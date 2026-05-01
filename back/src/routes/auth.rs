@@ -1,3 +1,5 @@
+use argon2::password_hash::rand_core::OsRng;
+use argon2::password_hash::{PasswordHash, SaltString};
 use argon2::{Argon2, PasswordHasher, PasswordVerifier};
 use axum::{Json, extract::State};
 use serde::{Deserialize, Serialize};
@@ -6,8 +8,20 @@ pub struct Claims {
     pub sub: String, // user id / username
     pub exp: usize,  // expiration timestamp
 }
+#[derive(Debug, Deserialize)]
+pub struct SignupRequest {
+    pub email: String,
+    pub username: Option<String>,
+    pub password: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct LoginRequest {
+    pub identifier: String, // email OR username
+    pub password: String,
+}
 use jsonwebtoken::{DecodingKey, EncodingKey, Header, Validation, decode, encode};
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 use time::OffsetDateTime;
 
 use crate::AppState;
@@ -44,28 +58,57 @@ pub fn verify_token(token: &str) -> Result<Claims, jsonwebtoken::errors::Error> 
     )?;
     Ok(data.claims)
 }
-#[derive(Deserialize, Serialize)]
-pub struct LoginRequest {
-    username: String,
-    password: String,
-}
-
 #[axum::debug_handler]
 pub async fn login(
-    State(t): State<AppState>,
-    Json(request): Json<LoginRequest>,
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<LoginRequest>,
 ) -> Result<String, &'static str> {
-    let valid = true; // pretend password check worked
-    if !valid {
+    // fetch user by email OR username
+    let user = sqlx::query!(
+        r#"
+        SELECT id, password_hash
+        FROM users
+        WHERE email = $1 OR username = $1
+        "#,
+        req.identifier
+    )
+    .fetch_optional(&state.pool)
+    .await
+    .map_err(|_| "db error")?;
+
+    let user = user.ok_or("invalid credentials")?;
+
+    let is_valid = verify_password(&req.password, &user.password_hash)?;
+    if !is_valid {
         return Err("invalid credentials");
     }
-    let token = create_token(&request.username);
+
+    let token = create_token(&user.id.to_string());
     Ok(token)
 }
-pub async fn signup(Json(request): Json<LoginRequest>) -> String {
-    // Normally: hash password + store in DB
-    let token = create_token(&request.username);
-    token
+#[axum::debug_handler]
+pub async fn signup(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<SignupRequest>,
+) -> Result<String, &'static str> {
+    let password_hash = hash_password(&req.password)?;
+
+    let user_id = sqlx::query_scalar!(
+        r#"
+        INSERT INTO users (email, username, password_hash)
+        VALUES ($1, $2, $3)
+        RETURNING id
+        "#,
+        req.email,
+        req.username,
+        password_hash
+    )
+    .fetch_one(&state.pool)
+    .await
+    .map_err(|_| "user creation failed")?;
+
+    let token = create_token(&user_id.to_string());
+    Ok(token)
 }
 pub fn auth_required(auth_header: &str) -> Result<Claims, &'static str> {
     let token = auth_header
@@ -90,4 +133,19 @@ impl<S: Sync> FromRequestParts<S> for AuthUser {
         let claims = auth_required(auth_header)?;
         Ok(AuthUser(claims))
     }
+}
+pub fn hash_password(password: &str) -> Result<String, &'static str> {
+    let salt = SaltString::generate(&mut OsRng);
+    let hash = Argon2::default()
+        .hash_password(password.as_bytes(), &salt)
+        .map_err(|_| "hashing failed")?
+        .to_string();
+
+    Ok(hash)
+}
+pub fn verify_password(password: &str, hash: &str) -> Result<bool, &'static str> {
+    let parsed_hash = PasswordHash::new(hash).map_err(|_| "invalid stored hash")?;
+    Ok(Argon2::default()
+        .verify_password(password.as_bytes(), &parsed_hash)
+        .is_ok())
 }

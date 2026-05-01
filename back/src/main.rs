@@ -1,10 +1,10 @@
-use axum::{Router, routing::get};
+use axum::{Extension, Router, response::Html, routing::get};
 use back::{
     AppState,
     routes::{
         auth::{login, signup},
         issues::{create_issue, get_issue, list_issues, list_pulls, repo_tree, view_file},
-        repo::repo_home,
+        repo::{create_repo, repo_home, update_repo},
         users::user_profile,
     },
 };
@@ -14,42 +14,41 @@ use std::{path::PathBuf, sync::Arc};
 #[tokio::main]
 async fn main() {
     dotenv().ok();
+    let host_address = std::env::var("SERVE_ADDRESS").unwrap();
     let path = PathBuf::from(std::env::var("GIT_REPO_PATH").unwrap());
     let db_url = std::env::var("DATABASE_URL").unwrap();
     let repo = match gix::discover(path.clone()) {
         Ok(repo) => repo,
         Err(e) => panic!("Invalid repo: {}", e),
     };
-    let state = AppState {
-        pool: Arc::new(PgPool::connect(&db_url).await.unwrap()),
-    };
+    let state = Arc::new(AppState {
+        pool: PgPool::connect(&db_url).await.unwrap(),
+    });
     if !repo.is_bare() {
         panic!("Not a bare repo: {:?}", path);
     }
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:3000")
-        .await
-        .unwrap();
-    println!("Listening on 127.0.0.1:3000");
+    let listener = tokio::net::TcpListener::bind(host_address).await.unwrap();
+    println!("Listening on {}", host_address);
     let app = Router::new()
+        .route("/", get(handler))
         .route("/login", get(login))
-        //Create a user for access to the server
         .route("/signup", get(signup))
-        //Routes to handlers for a user.
-        .with_state(state)
-        .nest("/{username}", user_routes());
+        .route("/:username", get(user_profile))
+        .route(
+            "/:username/:repo",
+            get(repo_home).post(create_repo).put(update_repo),
+        )
+        .route(
+            "/:username/:repo/issues",
+            get(list_issues).post(create_issue),
+        )
+        .route("/:username/:repo/issues/:id", get(get_issue))
+        .route("/:username/:repo/pulls", get(list_pulls))
+        .route("/:username/:repo/tree/:branch/*path", get(repo_tree))
+        .route("/:username/:repo/blob/:branch/*path", get(view_file))
+        .with_state(state);
     let _ = axum::serve(listener, app).await;
 }
-fn user_routes() -> Router {
-    Router::new()
-        .route("/", get(user_profile))
-        .nest("/{repo}", repo_routes())
-}
-fn repo_routes() -> Router {
-    Router::new()
-        .route("/", get(repo_home))
-        .route("/issues", get(list_issues).post(create_issue))
-        .route("/issues/{id}", get(get_issue))
-        .route("/pulls", get(list_pulls))
-        .route("/tree/{branch}/{*path}", get(repo_tree))
-        .route("/blob/{branch}/{*path}", get(view_file))
+async fn handler() -> Html<&'static str> {
+    Html("<h1>Hello, World!</h1>")
 }
