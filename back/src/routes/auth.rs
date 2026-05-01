@@ -1,6 +1,6 @@
+use argon2::{Argon2, PasswordHasher, PasswordVerifier};
 use axum::{Json, extract::State};
 use serde::{Deserialize, Serialize};
-
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Claims {
     pub sub: String, // user id / username
@@ -74,7 +74,20 @@ pub fn auth_required(auth_header: &str) -> Result<Claims, &'static str> {
 
     verify_token(token).map_err(|_| "invalid token")
 }
-pub async fn protected_route(auth_header: String) -> Result<String, &'static str> {
-    let claims = auth_required(&auth_header)?;
-    Ok(format!("Hello {}", claims.sub))
+use axum::{extract::FromRequestParts, http::request::Parts};
+
+pub struct AuthUser(pub Claims);
+
+impl<S: Sync> FromRequestParts<S> for AuthUser {
+    type Rejection = &'static str;
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
+        let auth_header = parts
+            .headers
+            .get("Authorization")
+            .and_then(|v| v.to_str().ok())
+            .ok_or("missing auth header")?;
+
+        let claims = auth_required(auth_header)?;
+        Ok(AuthUser(claims))
+    }
 }

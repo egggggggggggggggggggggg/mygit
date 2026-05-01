@@ -1,7 +1,9 @@
-use sqlx::SqlitePool;
+use std::sync::Arc;
+
+use sqlx::PgPool;
 
 #[derive(Clone)]
 pub struct AppState {
-    pub pool: SqlitePool,
+    pub pool: Arc<PgPool>,
 }
 pub mod routes;
