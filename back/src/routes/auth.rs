@@ -64,6 +64,7 @@ pub async fn login(
     Json(req): Json<LoginRequest>,
 ) -> Result<String, &'static str> {
     // fetch user by email OR username
+
     let user = sqlx::query!(
         r#"
         SELECT id, password_hash
@@ -75,14 +76,12 @@ pub async fn login(
     .fetch_optional(&state.pool)
     .await
     .map_err(|_| "db error")?;
-
     let user = user.ok_or("invalid credentials")?;
 
     let is_valid = verify_password(&req.password, &user.password_hash)?;
     if !is_valid {
         return Err("invalid credentials");
     }
-
     let token = create_token(&user.id.to_string());
     Ok(token)
 }

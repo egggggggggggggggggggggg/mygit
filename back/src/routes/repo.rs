@@ -13,16 +13,32 @@ pub struct NewRepo {
 pub struct UpdateRepo {
     description: Option<String>,
 }
-pub async fn repo_home() {}
+
+#[axum::debug_handler]
+pub async fn repo_home(Extension(state): Extension<Arc<AppState>>, Path(repo_name): Path<String>) {
+    let pool = &state.pool;
+    let rec = sqlx::query!(
+        r#"
+        SELECT id, owner_id 
+        FROM repositories
+        WHERE name = $1
+        "#,
+        repo_name
+    )
+    .fetch_one(pool)
+    .await
+    .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+}
+#[axum::debug_handler]
 pub async fn create_repo(
-    Json(payload): Json<NewRepo>,
     Extension(state): Extension<Arc<AppState>>,
+    Json(payload): Json<NewRepo>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
     let pool = &state.pool;
 
     let rec = sqlx::query!(
         r#"
-        INSERT INTO repos (name, description)
+        INSERT INTO repositories (name, description)
         VALUES ($1, $2)
         RETURNING id, name, description
         "#,
@@ -39,17 +55,17 @@ pub async fn create_repo(
         "description": rec.description
     })))
 }
-
+#[axum::debug_handler]
 pub async fn update_repo(
+    Extension(state): Extension<Arc<AppState>>,
     Path(repo_name): axum::extract::Path<String>,
     Json(payload): Json<UpdateRepo>,
-    Extension(state): Extension<Arc<AppState>>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
     let pool = &state.pool;
 
     let rec = sqlx::query!(
         r#"
-        UPDATE repos
+        UPDATE repositories 
         SET description = $1
         WHERE name = $2
         RETURNING id, name, description
@@ -67,4 +83,3 @@ pub async fn update_repo(
         "description": rec.description
     })))
 }
-pub fn foo() {}

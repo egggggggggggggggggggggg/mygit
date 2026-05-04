@@ -1,4 +1,4 @@
-use axum::{Extension, Router, response::Html, routing::get};
+use axum::{Router, response::Html, routing::get};
 use back::{
     AppState,
     routes::{
@@ -10,36 +10,33 @@ use back::{
 };
 use dotenvy::dotenv;
 use sqlx::PgPool;
-use std::{path::PathBuf, sync::Arc};
-
+use std::{path::PathBuf, sync::Arc, time::Duration};
+use tower::limit::RateLimitLayer;
 #[tokio::main]
 async fn main() {
     dotenv().ok();
     let host_address = std::env::var("SERVE_ADDRESS").unwrap();
-    let path = PathBuf::from(std::env::var("GIT_REPO_PATH").unwrap());
+    let git_storage = PathBuf::from(std::env::var("GIT_REPO_PATH").unwrap());
     let db_url = std::env::var("DATABASE_URL").unwrap();
-    ///This is wrong, it shouldn't be trying to find a single repo, rather a folder of bare repos.
-    ///Each bare repo correlates to an actual user repo.  
-    let repo = match gix::discover(path.clone()) {
-        Ok(repo) => repo,
-        Err(e) => panic!("Invalid repo: {}", e),
-    };
     let state = Arc::new(AppState {
         pool: PgPool::connect(&db_url).await.unwrap(),
+        git_storage,
     });
-    if !repo.is_bare() {
-        panic!("Not a bare repo: {:?}", path);
-    }
-    let listener = tokio::net::TcpListener::bind(host_address).await.unwrap();
+    let listener = tokio::net::TcpListener::bind(host_address.clone())
+        .await
+        .unwrap();
     println!("Listening on {}", host_address);
     let app = Router::new()
         .route("/", get(handler))
-        .route("/login", get(login))
+        .route(
+            "/login",
+            get(login).layer(RateLimitLayer::new(10, Duration::new(1, 0))),
+        )
         .route("/signup", get(signup))
         .route("/:username", get(user_profile))
         .route(
             "/:username/:repo",
-            get(repo_home).post(create_repo).put(update_repo),
+            get(repo_home).put(update_repo).post(create_repo),
         )
         .route(
             "/:username/:repo/issues",
