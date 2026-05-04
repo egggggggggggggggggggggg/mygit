@@ -11,12 +11,15 @@ use back::{
 use dotenvy::dotenv;
 use sqlx::PgPool;
 use std::{path::PathBuf, sync::Arc};
+
 #[tokio::main]
 async fn main() {
     dotenv().ok();
     let host_address = std::env::var("SERVE_ADDRESS").unwrap();
     let path = PathBuf::from(std::env::var("GIT_REPO_PATH").unwrap());
     let db_url = std::env::var("DATABASE_URL").unwrap();
+    ///This is wrong, it shouldn't be trying to find a single repo, rather a folder of bare repos.
+    ///Each bare repo correlates to an actual user repo.  
     let repo = match gix::discover(path.clone()) {
         Ok(repo) => repo,
         Err(e) => panic!("Invalid repo: {}", e),

@@ -67,4 +67,4 @@ pub async fn update_repo(
         "description": rec.description
     })))
 }
-
+pub fn foo() {}

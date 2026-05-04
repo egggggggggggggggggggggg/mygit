@@ -86,11 +86,16 @@ pub async fn login(
     let token = create_token(&user.id.to_string());
     Ok(token)
 }
+///This should be able to perform duplication checks.
 #[axum::debug_handler]
 pub async fn signup(
     State(state): State<Arc<AppState>>,
     Json(req): Json<SignupRequest>,
 ) -> Result<String, &'static str> {
+    if req.password.len() < 8 {
+        return Err("password too short");
+    }
+    let email = req.email.to_lowercase();
     let password_hash = hash_password(&req.password)?;
 
     let user_id = sqlx::query_scalar!(
@@ -99,7 +104,7 @@ pub async fn signup(
         VALUES ($1, $2, $3)
         RETURNING id
         "#,
-        req.email,
+        email,
         req.username,
         password_hash
     )

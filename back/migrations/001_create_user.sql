@@ -5,5 +5,5 @@ CREATE TABLE users (
     password_hash VARCHAR(255) NOT NULL,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
-
-CREATE UNIQUE INDEX idx_users_email ON users(email);
+--DROP INDEDX idx_users_email. Gotta run this on the laptop db.
+--CREATE UNIQUE INDEX idx_users_email ON users(email);

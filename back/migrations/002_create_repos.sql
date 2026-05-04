@@ -1,14 +1,15 @@
-CREATE TABLE repos (
-     id              UUID PRIMARY KEY,
-     owner_id        UUID NOT NULL REFERENCES users(id),
-
-     name            TEXT NOT NULL,
-     description     TEXT,
-
-     visibility      TEXT NOT NULL CHECK (visibility IN ('public', 'private', 'internal')),
-
-     default_branch  TEXT DEFAULT 'main',
-
-     created_at      TIMESTAMP DEFAULT NOW(),
-     updated_at      TIMESTAMP DEFAULT NOW()
+CREATE TABLE repositories (
+    id              UUID          PRIMARY KEY DEFAULT gen_random_uuid(),
+    owner_id        UUID          NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    name            VARCHAR(100)  NOT NULL,
+    description     TEXT,
+    is_private      BOOLEAN       NOT NULL DEFAULT FALSE,
+    default_branch  VARCHAR(255)  NOT NULL DEFAULT 'main',
+    forked_from_id  UUID          REFERENCES repositories(id) ON DELETE SET NULL,
+    created_at      TIMESTAMP     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at      TIMESTAMP     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (owner_id, name)
 );
+--Could possibly add a commits table as a sorta semi-cache for displaying repo history
+--Avoids file reading which is slower when the whole data isn't really needed. 
+
