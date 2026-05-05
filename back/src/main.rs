@@ -1,12 +1,16 @@
 //Left a lot of notes around so it might look ugly.
 //The errors in this are really janky, but this is just to get it up and running.
-use axum::{Router, response::Html, routing::get};
+use axum::{
+    Router,
+    response::Html,
+    routing::{get, post},
+};
 use back::{
     AppState,
     routes::{
         auth::{login, refresh, signup},
         issues::{create_issue, get_issue, list_issues, list_pulls, repo_tree, view_file},
-        repo::{create_repo, repo_home, update_repo},
+        repo::{create_commit, create_repo, repo_home, update_repo, update_repo_metadata},
         users::user_profile,
     },
 };
@@ -47,17 +51,24 @@ async fn main() {
         .route("/refresh", get(refresh))
         .route("/login", get(login))
         .route("/signup", get(signup))
+        // user
         .route("/:username", get(user_profile))
+        // repos
+        .route("/repos", post(create_repo))
         .route(
             "/:username/:repo",
-            get(repo_home).put(update_repo).post(create_repo),
+            get(repo_home).patch(update_repo_metadata),
         )
+        .route("/:username/:repo/commits", post(create_commit))
+        // issues
         .route(
             "/:username/:repo/issues",
             get(list_issues).post(create_issue),
         )
         .route("/:username/:repo/issues/:id", get(get_issue))
+        // pulls
         .route("/:username/:repo/pulls", get(list_pulls))
+        // browsing
         .route("/:username/:repo/tree/:branch/*path", get(repo_tree))
         .route("/:username/:repo/blob/:branch/*path", get(view_file))
         .with_state(state);
