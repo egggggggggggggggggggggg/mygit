@@ -11,4 +11,4 @@ CREATE TABLE users (
     avatar_url    VARCHAR(500),
     created_at    TIMESTAMP     NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at    TIMESTAMP     NOT NULL DEFAULT CURRENT_TIMESTAMP
-);    
+);

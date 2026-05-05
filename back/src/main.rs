@@ -1,8 +1,10 @@
+//Left a lot of notes around so it might look ugly.
+//The errors in this are really janky, but this is just to get it up and running.
 use axum::{Router, response::Html, routing::get};
 use back::{
     AppState,
     routes::{
-        auth::{login, signup},
+        auth::{login, refresh, signup},
         issues::{create_issue, get_issue, list_issues, list_pulls, repo_tree, view_file},
         repo::{create_repo, repo_home, update_repo},
         users::user_profile,
@@ -10,8 +12,21 @@ use back::{
 };
 use dotenvy::dotenv;
 use sqlx::PgPool;
-use std::{path::PathBuf, sync::Arc, time::Duration};
-use tower::limit::RateLimitLayer;
+use std::{
+    path::PathBuf,
+    sync::{Arc, OnceLock},
+};
+
+static JWT_SECRET: OnceLock<Vec<u8>> = OnceLock::new();
+
+pub fn jwt_secret() -> &'static [u8] {
+    JWT_SECRET.get_or_init(|| {
+        std::env::var("JWT_SECRET")
+            .expect("JWT_SECRET must be set")
+            .into_bytes()
+    })
+}
+
 #[tokio::main]
 async fn main() {
     dotenv().ok();
@@ -21,6 +36,7 @@ async fn main() {
     let state = Arc::new(AppState {
         pool: PgPool::connect(&db_url).await.unwrap(),
         git_storage,
+        jwt_secret: jwt_secret(),
     });
     let listener = tokio::net::TcpListener::bind(host_address.clone())
         .await
@@ -28,10 +44,8 @@ async fn main() {
     println!("Listening on {}", host_address);
     let app = Router::new()
         .route("/", get(handler))
-        .route(
-            "/login",
-            get(login).layer(RateLimitLayer::new(10, Duration::new(1, 0))),
-        )
+        .route("/refresh", get(refresh))
+        .route("/login", get(login))
         .route("/signup", get(signup))
         .route("/:username", get(user_profile))
         .route(
