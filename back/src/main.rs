@@ -2,6 +2,7 @@
 //The errors in this are really janky, but this is just to get it up and running.
 use axum::{
     Router,
+    http::Method,
     response::Html,
     routing::{get, post},
 };
@@ -10,7 +11,7 @@ use back::{
     routes::{
         auth::{login, refresh, signup},
         issues::{create_issue, get_issue, list_issues, list_pulls, repo_tree, view_file},
-        repo::{create_commit, create_repo, repo_home, update_repo, update_repo_metadata},
+        repo::{create_commit, create_repo, repo_home, update_repo_metadata},
         users::user_profile,
     },
 };
@@ -19,8 +20,10 @@ use sqlx::PgPool;
 use std::{
     path::PathBuf,
     sync::{Arc, OnceLock},
+    time::Duration,
 };
-
+use tower::limit::RateLimitLayer;
+use tower_http::cors::{Any, CorsLayer};
 static JWT_SECRET: OnceLock<Vec<u8>> = OnceLock::new();
 
 pub fn jwt_secret() -> &'static [u8] {
@@ -30,7 +33,6 @@ pub fn jwt_secret() -> &'static [u8] {
             .into_bytes()
     })
 }
-
 #[tokio::main]
 async fn main() {
     dotenv().ok();
@@ -45,6 +47,11 @@ async fn main() {
     let listener = tokio::net::TcpListener::bind(host_address.clone())
         .await
         .unwrap();
+    let cors_layer =
+        CorsLayer::new()
+            .allow_origin(Any)
+            .allow_methods([Method::GET, Method::PUT, Method::POST]);
+    let rate_limit_layer = RateLimitLayer::new(10, Duration::from_secs(1));
     println!("Listening on {}", host_address);
     let app = Router::new()
         .route("/", get(handler))

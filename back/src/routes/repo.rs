@@ -2,8 +2,11 @@ use crate::{AppState, routes::auth::AuthUser};
 use axum::{
     Json,
     extract::{Path, State},
+    http::StatusCode,
 };
+use gix::create::Kind;
 use serde::Deserialize;
+use std::fs;
 use std::sync::Arc;
 
 #[derive(Deserialize)]
@@ -55,7 +58,11 @@ pub async fn create_repo(
         .sub
         .parse::<uuid::Uuid>()
         .map_err(|_| axum::http::StatusCode::UNAUTHORIZED)?;
-
+    let mut tx = state
+        .pool
+        .begin()
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     let rec = sqlx::query!(
         r#"
         INSERT INTO repositories (owner_id, name, description)
@@ -66,18 +73,28 @@ pub async fn create_repo(
         payload.name,
         payload.description
     )
-    .fetch_one(&state.pool)
+    .fetch_one(&mut *tx)
     .await
     .map_err(|e| {
         // handle duplicate repo name per user
         if let sqlx::Error::Database(db_err) = &e
             && db_err.code().as_deref() == Some("23505")
         {
-            return axum::http::StatusCode::CONFLICT;
+            return StatusCode::CONFLICT;
         }
-        axum::http::StatusCode::INTERNAL_SERVER_ERROR
+        StatusCode::INTERNAL_SERVER_ERROR
     })?;
-
+    let repo_path = state
+        .git_storage
+        .join(user_id.to_string())
+        .join(&payload.name);
+    if init_bare_repo(&repo_path).is_err() {
+        tx.rollback().await.ok();
+        return Err(StatusCode::INTERNAL_SERVER_ERROR);
+    }
+    tx.commit()
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(Json(serde_json::json!({
         "id": rec.id,
         "name": rec.name,
@@ -85,7 +102,7 @@ pub async fn create_repo(
     })))
 }
 #[axum::debug_handler]
-pub async fn update_repo(
+pub async fn update_repo_metadata(
     AuthUser(claims): AuthUser,
     State(state): State<Arc<AppState>>,
     Path(repo_name): Path<String>,
@@ -95,7 +112,6 @@ pub async fn update_repo(
         .sub
         .parse::<uuid::Uuid>()
         .map_err(|_| axum::http::StatusCode::UNAUTHORIZED)?;
-
     let rec = sqlx::query!(
         r#"
         UPDATE repositories 
@@ -110,14 +126,17 @@ pub async fn update_repo(
     .fetch_optional(&state.pool)
     .await
     .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
-
     let rec = rec.ok_or(axum::http::StatusCode::NOT_FOUND)?;
-
     Ok(Json(serde_json::json!({
         "id": rec.id,
         "name": rec.name,
         "description": rec.description
     })))
 }
-pub async fn update_repo_metadata() {}
 pub async fn create_commit() {}
+fn init_bare_repo(path: &std::path::Path) -> Result<(), &'static str> {
+    fs::create_dir_all(path).map_err(|_| "Failed to create the directory for the repo")?;
+    gix::create::into(path, Kind::Bare, gix::create::Options::default())
+        .map_err(|_| "failed to initialize bare repo")?;
+    Ok(())
+}
