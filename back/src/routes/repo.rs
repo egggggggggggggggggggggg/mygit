@@ -1,7 +1,13 @@
-use crate::{AppState, routes::auth::AuthUser};
+use crate::{
+    AppState,
+    routes::{
+        auth::{AuthUser, MaybeAuthUser},
+        issues::Pagination, repo,
+    },
+};
 use axum::{
     Json,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
 };
 use gix::create::Kind;
@@ -20,22 +26,23 @@ pub struct NewRepo {
 pub struct UpdateRepo {
     description: Option<String>,
 }
-
-#[axum::debug_handler]
+///Can view without auth if repo is public.
 pub async fn repo_home(
-    AuthUser(claims): AuthUser,
+    MaybeAuthUser(maybe_claims): MaybeAuthUser,
     State(state): State<Arc<AppState>>,
     Path((owner_id, repo_name)): Path<(uuid::Uuid, String)>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let user_id = claims.sub.parse::<uuid::Uuid>().unwrap();
+    let user_id = maybe_claims.and_then(|c| c.sub.parse::<uuid::Uuid>().ok());
+
     //Might not wanna do * cause there might be sensitive data but this works for now.
+    //Looks for the repository falling under an owner id 2
     let rec = sqlx::query!(
         r#"
         SELECT r.*
         FROM repositories r
         WHERE r.owner_id = $1
-          AND r.name = $2
-          AND (
+            AND r.name = $2
+            AND (
                 r.is_private = false
                 OR r.owner_id = $3
                 OR EXISTS (
@@ -143,7 +150,58 @@ pub async fn update_repo_metadata(
         "description": rec.description
     })))
 }
-pub async fn list_commits() {}
+pub async fn list_commits(
+    MaybeAuthUser(maybe_claims): MaybeAuthUser,
+    Query(pagination): Query<Pagination>,
+    State(state): State<AppState>,
+    Path((repo_owner, repo_name)): Path<(String, String)>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let user_id = maybe_claims.and_then(|c| c.sub.parse::<uuid::Uuid>().ok());
+    let owner_id =  sqlx::query_scalar!(r#"
+    SELECT id 
+    FROM users 
+    WHERE 
+
+    "#,).fetch_one(&state.pool);
+    // Access check
+    let has_access = sqlx::query_scalar!(
+        r#"
+        SELECT EXISTS (
+            SELECT 1
+            FROM repositories r
+            WHERE r.username = $1
+              AND r.name = $2
+              AND (
+                    r.is_private = false
+                    OR r.owner_id = $3
+                    OR EXISTS (
+                        SELECT 1
+                        FROM repository_collaborators rc
+                        WHERE rc.repository_id = r.id
+                          AND rc.user_id = $3
+                    )
+              )
+        )
+        "#,
+        repo_owner,
+        repo_name,
+        user_id
+    )
+    .fetch_one(&state.pool)
+    .await
+    .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?
+    .unwrap_or(false);
+    if !has_access {
+        return Err(axum::http::StatusCode::NOT_FOUND); // GitHub-style
+    }
+    let mut commits = Vec::new();
+    // If we reach here, user has access → fetch list_commits
+    let path = state.git_storage.clone().join(owner_id)
+    let repo = gix::open("");
+    Ok(Json(serde_json::json!({
+        "commits": commits
+    })))
+}
 fn init_bare_repo(path: &std::path::Path) -> Result<(), &'static str> {
     fs::create_dir_all(path).map_err(|_| "Failed to create the directory for the repo")?;
     gix::create::into(path, Kind::Bare, gix::create::Options::default())

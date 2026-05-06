@@ -112,7 +112,8 @@ pub async fn login(
     State(state): State<Arc<AppState>>,
     Json(req): Json<LoginRequest>,
 ) -> Result<AuthResponse, &'static str> {
-    // fetch user by email OR username
+    //Might wanna replace this
+    const DUMMY_HASH: &str = "$2b$12$C6UzMDM.H6dfI/f/IKcEeO1Yp9rj5l9FQ8s8JrIoYNewc19hXtF8K";
     let user = sqlx::query!(
         r#"
         SELECT id, password_hash
@@ -124,15 +125,20 @@ pub async fn login(
     .fetch_optional(&state.pool)
     .await
     .map_err(|_| "db error")?;
-    let user = user.ok_or("invalid credentials")?;
-    let is_valid = verify_password(&req.password, &user.password_hash)?;
-    if !is_valid {
+    // Always verify password, even if user doesn't exist
+    let (user_id, password_hash) = match user {
+        Some(u) => (Some(u.id), u.password_hash),
+        None => (None, DUMMY_HASH.to_string()),
+    };
+    let is_valid = verify_password(&req.password, &password_hash).map_err(|_| "auth error")?;
+    if user_id.is_none() || !is_valid {
         return Err("invalid credentials");
     }
-    let access_token = generate_access_token(&user.id.to_string(), state.jwt_secret)
+    let user_id = user_id.unwrap();
+    let access_token = generate_access_token(&user_id.to_string(), state.jwt_secret)
         .map_err(|_| "Failed to create token")?;
     let refresh_token = generate_refresh_token();
-    store_refresh_token(&state.pool, user.id, &refresh_token)
+    store_refresh_token(&state.pool, user_id, &refresh_token)
         .await
         .map_err(|_| "Failed to store refresh token")?;
     Ok(AuthResponse {
@@ -140,14 +146,12 @@ pub async fn login(
         refresh_token,
     })
 }
-
 #[axum::debug_handler]
 pub async fn logout(
     State(state): State<Arc<AppState>>,
     Json(req): Json<RefreshRequest>,
 ) -> Result<(), &'static str> {
     let token_hash = hash_refresh_token(&req.refresh_token);
-
     sqlx::query!(
         "DELETE FROM refresh_tokens WHERE token_hash = $1",
         token_hash
@@ -155,7 +159,6 @@ pub async fn logout(
     .execute(&state.pool)
     .await
     .map_err(|_| "db error")?;
-
     Ok(())
 }
 ///This should be able to perform duplication checks.
@@ -287,5 +290,23 @@ impl FromRequestParts<Arc<AppState>> for AuthUser {
             .and_then(|v| v.to_str().ok())
             .ok_or("missing auth header")?;
         Ok(Self(auth_required(auth_header, state.jwt_secret)?))
+    }
+}
+///For routes where auth may not be neccesary.
+pub struct MaybeAuthUser(pub Option<Claims>);
+impl FromRequestParts<Arc<AppState>> for MaybeAuthUser {
+    type Rejection = std::convert::Infallible;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &Arc<AppState>,
+    ) -> Result<Self, Self::Rejection> {
+        let claims = parts
+            .headers
+            .get("Authorization")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|auth_header| auth_required(auth_header, state.jwt_secret).ok());
+
+        Ok(Self(claims))
     }
 }

@@ -7,7 +7,7 @@ use axum::{
     routing::{get, post},
 };
 use back::{
-    AppState,
+    AppState, CacheLayer,
     routes::{
         auth::{login, refresh, signup},
         issues::{create_issue, get_issue, list_issues, list_pulls, repo_tree, view_file},
@@ -42,6 +42,7 @@ async fn main() {
     let state = Arc::new(AppState {
         pool: PgPool::connect(&db_url).await.unwrap(),
         git_storage,
+        cache: CacheLayer::default(),
         jwt_secret: jwt_secret(),
     });
     let listener = tokio::net::TcpListener::bind(host_address.clone())
