@@ -13,12 +13,14 @@ use std::sync::Arc;
 pub struct NewRepo {
     name: String,
     description: Option<String>,
+    is_private: bool,
 }
 
 #[derive(Deserialize)]
 pub struct UpdateRepo {
     description: Option<String>,
 }
+
 #[axum::debug_handler]
 pub async fn repo_home(
     AuthUser(claims): AuthUser,
@@ -26,24 +28,32 @@ pub async fn repo_home(
     Path((owner_id, repo_name)): Path<(uuid::Uuid, String)>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
     let user_id = claims.sub.parse::<uuid::Uuid>().unwrap();
-
+    //Might not wanna do * cause there might be sensitive data but this works for now.
     let rec = sqlx::query!(
         r#"
-        SELECT id, owner_id, is_private
-        FROM repositories
-        WHERE owner_id = $1 AND name = $2
+        SELECT r.*
+        FROM repositories r
+        WHERE r.owner_id = $1
+          AND r.name = $2
+          AND (
+                r.is_private = false
+                OR r.owner_id = $3
+                OR EXISTS (
+                    SELECT 1
+                    FROM repository_collaborators rc
+                    WHERE rc.repository_id = r.id
+                      AND rc.user_id = $3
+                )
+          )
         "#,
         owner_id,
-        repo_name
+        repo_name,
+        user_id
     )
-    .fetch_one(&state.pool)
+    .fetch_optional(&state.pool)
     .await
-    .map_err(|_| axum::http::StatusCode::NOT_FOUND)?;
-
-    if rec.is_private && rec.owner_id != user_id {
-        return Err(axum::http::StatusCode::FORBIDDEN);
-    }
-
+    .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?
+    .ok_or(axum::http::StatusCode::NOT_FOUND)?;
     Ok(Json(serde_json::json!({
         "id": rec.id
     })))
@@ -133,7 +143,7 @@ pub async fn update_repo_metadata(
         "description": rec.description
     })))
 }
-pub async fn create_commit() {}
+pub async fn list_commits() {}
 fn init_bare_repo(path: &std::path::Path) -> Result<(), &'static str> {
     fs::create_dir_all(path).map_err(|_| "Failed to create the directory for the repo")?;
     gix::create::into(path, Kind::Bare, gix::create::Options::default())

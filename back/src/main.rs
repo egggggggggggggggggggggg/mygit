@@ -11,7 +11,7 @@ use back::{
     routes::{
         auth::{login, refresh, signup},
         issues::{create_issue, get_issue, list_issues, list_pulls, repo_tree, view_file},
-        repo::{create_commit, create_repo, repo_home, update_repo_metadata},
+        repo::{create_repo, list_commits, repo_home, update_repo_metadata},
         users::user_profile,
     },
 };
@@ -66,7 +66,7 @@ async fn main() {
             "/:username/:repo",
             get(repo_home).patch(update_repo_metadata),
         )
-        .route("/:username/:repo/commits", post(create_commit))
+        .route("/:username/:repo/commits", get(list_commits))
         // issues
         .route(
             "/:username/:repo/issues",

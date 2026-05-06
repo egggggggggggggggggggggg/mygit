@@ -11,6 +11,7 @@ dotenvy = "0.15.7"
 gix = {version = "0.83.0"}
 hex = "0.4.3"
 jsonwebtoken = "10.3.0"
+moka = {version = "0.12.15", features= ["future"]}
 rand = "0.10.1"
 rand_core = "0.10.1"
 serde = {version="1.0.228", features=["derive"]}
