@@ -1,9 +1,7 @@
 use crate::{
-    AppState,
-    routes::{
-        auth::{AuthUser, MaybeAuthUser},
-        issues::Pagination,
-    },
+    AppState, Pagination,
+    routes::auth::{AuthUser, MaybeAuthUser},
+    wraps::commits::commits_for_branch_paginated,
 };
 use axum::{
     Json,
@@ -19,7 +17,6 @@ use std::sync::Arc;
 pub struct NewRepo {
     name: String,
     description: Option<String>,
-    is_private: bool,
 }
 
 #[derive(Deserialize)]
@@ -30,10 +27,20 @@ pub struct UpdateRepo {
 pub async fn repo_home(
     MaybeAuthUser(maybe_claims): MaybeAuthUser,
     State(state): State<Arc<AppState>>,
-    Path((owner_id, repo_name)): Path<(uuid::Uuid, String)>,
+    Path((owner_name, repo_name)): Path<(String, String)>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let user_id = maybe_claims.and_then(|c| c.sub.parse::<uuid::Uuid>().ok());
+    let user_id = maybe_claims.map(|c| c.sub);
+    let owner_id = sqlx::query_scalar!(
+        r#"
+    SELECT username 
+    FROM users
+    WHERE id = $1
 
+
+
+    "#,
+        owner_name
+    );
     //Might not wanna do * cause there might be sensitive data but this works for now.
     //Looks for the repository falling under an owner id 2
     let rec = sqlx::query!(
@@ -49,9 +56,9 @@ pub async fn repo_home(
                     SELECT 1
                     FROM repository_collaborators rc
                     WHERE rc.repository_id = r.id
-                      AND rc.user_id = $3
+                        AND rc.user_id = $3
                 )
-          )
+            )
         "#,
         owner_id,
         repo_name,
@@ -71,10 +78,7 @@ pub async fn create_repo(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<NewRepo>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let user_id = claims
-        .sub
-        .parse::<uuid::Uuid>()
-        .map_err(|_| axum::http::StatusCode::UNAUTHORIZED)?;
+    let user_id = claims.sub;
     let mut tx = state
         .pool
         .begin()
@@ -125,10 +129,7 @@ pub async fn update_repo_metadata(
     Path(repo_name): Path<String>,
     Json(payload): Json<UpdateRepo>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let user_id = claims
-        .sub
-        .parse::<uuid::Uuid>()
-        .map_err(|_| axum::http::StatusCode::UNAUTHORIZED)?;
+    let user_id = claims.sub;
     let rec = sqlx::query!(
         r#"
         UPDATE repositories 
@@ -157,7 +158,7 @@ pub async fn list_commits(
     Path((repo_owner, repo_name)): Path<(String, String)>,
     Query(pagination): Query<Pagination>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let user_id = maybe_claims.and_then(|c| c.sub.parse::<uuid::Uuid>().ok());
+    let user_id = maybe_claims.map(|c| c.sub);
     // Access check
     let has_access = sqlx::query_scalar!(
         r#"
@@ -190,9 +191,23 @@ pub async fn list_commits(
     if !has_access {
         return Err(axum::http::StatusCode::NOT_FOUND); // GitHub-style
     }
-    // If we reach here, user has access → fetch list_commits
-    let path = state.git_storage.clone().join(repo_owner).join(repo_name);
-    Ok(Json(serde_json::json!({})))
+    //Page should not be limited to 1  but the total amount of commits.
+    //Repo meta data should return the amount of commits and issues which avoids having to process
+    //all the repo metadata reading which is faster. Also check the in mem cache.
+    let page = pagination.page.unwrap_or(1).max(1);
+    let per_page = pagination.per_page.unwrap_or(20).clamp(1, 100);
+
+    let path = state.git_storage.clone().join(&repo_owner).join(&repo_name);
+    let repo = gix::open(path).unwrap();
+    let commits = commits_for_branch_paginated(
+        &repo, "main", // or resolve default branch properly
+        page, per_page,
+    )
+    .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(Json(serde_json::json!({
+        "commits": commits,
+    })))
 }
 pub async fn repo_tree() {}
 pub async fn view_file() {}

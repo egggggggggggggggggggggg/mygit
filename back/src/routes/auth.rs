@@ -1,28 +1,50 @@
 use {
     crate::AppState,
-    argon2::password_hash::rand_core::{OsRng, RngCore},
-    argon2::password_hash::{PasswordHash, SaltString},
-    argon2::{Argon2, PasswordHasher, PasswordVerifier},
-    axum::http::StatusCode,
+    argon2::{
+        Argon2, PasswordHasher, PasswordVerifier,
+        password_hash::{
+            PasswordHash, SaltString,
+            rand_core::{OsRng, RngCore},
+        },
+    },
     axum::{
         Json,
         extract::{FromRequestParts, State},
-        http::request::Parts,
+        http::{StatusCode, header, request::Parts},
         response::IntoResponse,
     },
     base64::{Engine as _, engine::general_purpose},
-    jsonwebtoken::{DecodingKey, EncodingKey, Header, Validation, decode, encode},
+    chrono::{Duration, Utc},
+    jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header, Validation, decode, encode},
     serde::{Deserialize, Serialize},
     sha2::{Digest, Sha256},
     sqlx::{Executor, Postgres},
     std::sync::Arc,
-    time::{Duration, OffsetDateTime},
+    time::OffsetDateTime,
+    uuid::Uuid,
 };
+#[derive(thiserror::Error, Debug)]
+pub enum AuthError {
+    #[error("invalid credentials")]
+    InvalidCredentials,
+    #[error("token expired")]
+    TokenExpired,
+    #[error("database error")]
+    Database(#[from] sqlx::Error),
+    #[error("jwt error")]
+    Jwt(#[from] jsonwebtoken::errors::Error),
+    #[error("token generation error")]
+    TokenGen,
+}
 //TODO: Will replace &'static str with an actual error enum for returning.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Claims {
-    pub sub: String, // user id / username
-    pub exp: usize,  // expiration timestamp
+    pub sub: uuid::Uuid,
+    pub exp: chrono::DateTime<Utc>,
+    pub iat: chrono::DateTime<Utc>,
+    pub iss: String,
+    pub aud: String,
+    pub jti: Uuid,
 }
 #[derive(Debug, Deserialize)]
 pub struct SignupRequest {
@@ -36,31 +58,41 @@ pub struct LoginRequest {
     pub identifier: String, // email OR username
     pub password: String,
 }
-pub fn generate_access_token(
-    user_id: &str,
-    secret: &'static [u8],
-) -> Result<String, jsonwebtoken::errors::Error> {
-    let expiration = OffsetDateTime::now_utc().unix_timestamp() as usize + 60 * 60; // 1 hour
+//The return statement is probably dumb
+pub fn generate_access_token(user_id: Uuid, secret: &'static [u8]) -> Result<String, AuthError> {
+    let now = chrono::Utc::now();
     let claims = Claims {
-        sub: user_id.to_string(),
-        exp: expiration,
+        sub: user_id,
+        exp: now + Duration::minutes(10),
+        iat: now,
+        iss: "my-api".to_string(),
+        aud: "my-app".to_string(),
+        jti: Uuid::new_v4(),
     };
-    encode(
-        &Header::default(),
+    Ok(encode(
+        &Header::new(Algorithm::HS256),
         &claims,
         &EncodingKey::from_secret(secret),
-    )
+    )?)
 }
-pub fn verify_token(
-    token: &str,
-    secret: &'static [u8],
-) -> Result<Claims, jsonwebtoken::errors::Error> {
-    let data = decode::<Claims>(
-        token,
-        &DecodingKey::from_secret(secret),
-        &Validation::default(),
-    )?;
-    Ok(data.claims)
+pub fn verify_token(token: &str, secret: &'static [u8]) -> Result<Claims, AuthError> {
+    let mut validation = Validation::new(Algorithm::HS256);
+    // required claims
+    validation.validate_exp = true;
+    validation.set_audience(&["my-app"]);
+    validation.set_issuer(&["my-api"]);
+    // optional but recommended
+    validation.required_spec_claims = std::collections::HashSet::from([
+        "exp".to_string(),
+        "iat".to_string(),
+        "sub".to_string(),
+        "iss".to_string(),
+        "aud".to_string(),
+        "jti".to_string(),
+    ]);
+    validation.leeway = 30;
+    let token_data = decode::<Claims>(token, &DecodingKey::from_secret(secret), &validation)?;
+    Ok(token_data.claims)
 }
 pub fn generate_refresh_token() -> String {
     let mut bytes = [0u8; 32]; // 256-bit
@@ -74,12 +106,12 @@ pub async fn store_refresh_token<'e, E>(
     executor: E,
     user_id: uuid::Uuid,
     token: &str,
-) -> Result<(), sqlx::Error>
+) -> Result<(), AuthError>
 where
     E: Executor<'e, Database = Postgres>,
 {
     let token_hash = hash_refresh_token(token);
-    let expires_at = OffsetDateTime::now_utc() + Duration::days(7);
+    let expires_at = OffsetDateTime::now_utc() + time::Duration::days(7);
     sqlx::query!(
         r#"
         INSERT INTO refresh_tokens (user_id, token_hash, expires_at)
@@ -112,7 +144,7 @@ pub async fn login(
     State(state): State<Arc<AppState>>,
     Json(req): Json<LoginRequest>,
 ) -> Result<AuthResponse, &'static str> {
-    //Might wanna replace this
+    //Might wanna replace this. This is bcrypt not argon2.
     const DUMMY_HASH: &str = "$2b$12$C6UzMDM.H6dfI/f/IKcEeO1Yp9rj5l9FQ8s8JrIoYNewc19hXtF8K";
     let user = sqlx::query!(
         r#"
@@ -135,8 +167,8 @@ pub async fn login(
         return Err("invalid credentials");
     }
     let user_id = user_id.unwrap();
-    let access_token = generate_access_token(&user_id.to_string(), state.jwt_secret)
-        .map_err(|_| "Failed to create token")?;
+    let access_token =
+        generate_access_token(user_id, state.jwt_secret).map_err(|_| "Failed to create token")?;
     let refresh_token = generate_refresh_token();
     store_refresh_token(&state.pool, user_id, &refresh_token)
         .await
@@ -198,8 +230,8 @@ pub async fn signup(
         }
         "Interal server error"
     })?;
-    let access_token = generate_access_token(&user_id.to_string(), state.jwt_secret)
-        .map_err(|_| "Failed to create a token")?;
+    let access_token =
+        generate_access_token(user_id, state.jwt_secret).map_err(|_| "Failed to create a token")?;
     let refresh_token = generate_refresh_token();
     store_refresh_token(&state.pool, user_id, &refresh_token)
         .await
@@ -235,6 +267,11 @@ pub async fn refresh(
     Json(req): Json<RefreshRequest>,
 ) -> Result<AuthResponse, &'static str> {
     let token_hash = hash_refresh_token(&req.refresh_token);
+    let mut tx = state
+        .pool
+        .begin()
+        .await
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR.as_str())?;
     let record = sqlx::query!(
         r#"
         SELECT id, user_id, expires_at
@@ -243,14 +280,9 @@ pub async fn refresh(
         "#,
         token_hash
     )
-    .fetch_optional(&state.pool)
+    .fetch_optional(&mut *tx)
     .await
     .map_err(|_| "db error")?;
-    let mut tx = state
-        .pool
-        .begin()
-        .await
-        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR.as_str())?;
     let record = record.ok_or("invalid token")?;
     if record.expires_at < OffsetDateTime::now_utc() {
         return Err("Refresh token expired");
@@ -264,7 +296,7 @@ pub async fn refresh(
         .await
         .map_err(|_| "db error")?;
     tx.commit().await.map_err(|_| "Transaction failed")?;
-    let access_token = generate_access_token(&record.user_id.to_string(), state.jwt_secret)
+    let access_token = generate_access_token(record.user_id, state.jwt_secret)
         .map_err(|_| "Failed to create token")?;
     Ok(AuthResponse {
         access_token,
@@ -286,7 +318,7 @@ impl FromRequestParts<Arc<AppState>> for AuthUser {
     ) -> Result<Self, Self::Rejection> {
         let auth_header = parts
             .headers
-            .get("Authorization")
+            .get(header::AUTHORIZATION)
             .and_then(|v| v.to_str().ok())
             .ok_or("missing auth header")?;
         Ok(Self(auth_required(auth_header, state.jwt_secret)?))
@@ -306,7 +338,6 @@ impl FromRequestParts<Arc<AppState>> for MaybeAuthUser {
             .get("Authorization")
             .and_then(|v| v.to_str().ok())
             .and_then(|auth_header| auth_required(auth_header, state.jwt_secret).ok());
-
         Ok(Self(claims))
     }
 }

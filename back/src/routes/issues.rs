@@ -10,13 +10,7 @@ use sqlx::FromRow;
 use time::Time;
 use uuid::Uuid;
 
-use crate::{AppState, routes::auth::AuthUser};
-
-#[derive(Deserialize)]
-pub struct Pagination {
-    pub page: Option<usize>,
-    pub per_page: Option<usize>,
-}
+use crate::{AppState, Pagination, routes::auth::AuthUser};
 
 #[derive(Deserialize)]
 pub struct IssueCreation {
@@ -134,22 +128,22 @@ pub async fn create_issue(
     .await
     .map_err(internal_error)?;
 
-    let repo_id = repo_id.ok_or((StatusCode::NOT_FOUND, "Repository not found".to_string()))?;
+    let repo_id =
+        repo_id.ok_or_else(|| (StatusCode::NOT_FOUND, "Repository not found".to_string()))?;
     //Might not be needed.
     // Generate next issue number scoped to repository
     let next_number: i32 = sqlx::query_scalar(
         r#"
-        SELECT COALESCE(MAX(number), 0) + 1
-        FROM issues
-        WHERE repository_id = $1
+        UPDATE repositories
+        SET next_issue_number = next_issue_number + 1
+        WHERE id = $1
+        RETURNING next_issue_number - 1
         "#,
     )
     .bind(repo_id)
     .fetch_one(&mut *tx)
     .await
-    .map_err(internal_error)?;
-
-    // Insert issue
+    .map_err(internal_error)?; // Insert issue
     let issue = sqlx::query_as::<_, Issue>(
         r#"
         INSERT INTO issues (
@@ -223,8 +217,7 @@ pub async fn get_issue(
     .fetch_optional(&state.pool)
     .await
     .map_err(internal_error)?
-    .ok_or((StatusCode::NOT_FOUND, "Issue not found".to_string()))?;
-
+    .ok_or_else(|| (StatusCode::NOT_FOUND, "Issue not found".to_string()))?;
     Ok(Json(issue))
 }
 

@@ -52,11 +52,11 @@ async fn main() {
     let listener = tokio::net::TcpListener::bind(host_address.clone())
         .await
         .unwrap();
-    let cors_layer =
+    let _cors_layer =
         CorsLayer::new()
             .allow_origin(Any)
             .allow_methods([Method::GET, Method::PUT, Method::POST]);
-    let rate_limit_layer = RateLimitLayer::new(10, Duration::from_secs(1));
+    let _rate_limit_layer = RateLimitLayer::new(10, Duration::from_secs(1));
     println!("Listening on {}", host_address);
     //Serve
     let app = Router::new()
@@ -65,25 +65,28 @@ async fn main() {
         .route("/login", get(login))
         .route("/signup", get(signup))
         // user
-        .route("/:username", get(user_profile))
+        .route("/{username}", get(user_profile))
         // repos
         .route("/repos", post(create_repo))
         .route(
-            "/:username/:repo",
+            "/{username}/{repo}",
             get(repo_home).patch(update_repo_metadata),
         )
-        .route("/:username/:repo/commits", get(list_commits))
+        .route("/{username}/{repo}/commits", get(list_commits))
         // issues
         .route(
-            "/:username/:repo/issues",
+            "/{username}/{repo}/issues",
             get(list_issues).post(create_issue),
         )
-        .route("/:username/:repo/issues/:id", get(get_issue))
+        .route("/{username}/{repo}/issues/{id}", get(get_issue))
         // pulls
-        .route("/:username/:repo/pulls", get(list_pulls).post(create_pull))
+        .route(
+            "/{username}/{repo}/pulls",
+            get(list_pulls).post(create_pull),
+        )
         // browsing
-        .route("/:username/:repo/tree/:branch/*path", get(repo_tree))
-        .route("/:username/:repo/blob/:branch/*path", get(view_file))
+        .route("/{username}/{repo}/tree/{branch}/{*path}", get(repo_tree))
+        .route("/{username}/{repo}/blob/{branch}/{*path}", get(view_file))
         .with_state(state);
     axum::serve(listener, app).await.unwrap();
 }

@@ -16,9 +16,10 @@
 
 use anyhow::Context as _;
 use gix::{ObjectId, Repository};
+use serde::Serialize;
 
 /// Full metadata extracted from a single commit.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct CommitInfo {
     /// Full 40-hex SHA-1 / SHA-256 object ID.
     pub hash: ObjectId,
@@ -127,10 +128,10 @@ fn walk_and_collect(
     let mut result = Vec::with_capacity(cap.min(4096));
 
     for info in walk {
-        if let Some(n) = limit {
-            if result.len() >= n {
-                break;
-            }
+        if let Some(n) = limit
+            && result.len() >= n
+        {
+            break;
         }
 
         let info = info.context("error advancing revision walk")?;
@@ -141,6 +142,51 @@ fn walk_and_collect(
         }
 
         // Only here do we pay the cost of inflating and decoding the commit.
+        let commit = repo
+            .find_commit(info.id)
+            .with_context(|| format!("could not load commit {}", info.id))?;
+
+        result.push(CommitInfo::try_from(commit)?);
+    }
+
+    Ok(result)
+}
+
+pub fn commits_for_branch_paginated(
+    repo: &Repository,
+    branch: &str,
+    page: usize,
+    per_page: usize,
+) -> Result<Vec<CommitInfo>, anyhow::Error> {
+    let tip = repo
+        .find_reference(branch)
+        .with_context(|| format!("reference '{branch}' not found"))?
+        .into_fully_peeled_id()
+        .with_context(|| format!("could not peel '{branch}' to a commit"))?
+        .detach();
+
+    let skip = page.saturating_sub(1) * per_page;
+
+    let walk = repo
+        .rev_walk([tip])
+        .all()
+        .context("failed to initialise revision walk")?;
+
+    let mut result = Vec::with_capacity(per_page);
+
+    for (i, info) in walk.enumerate() {
+        let info = info.context("error advancing revision walk")?;
+
+        // Skip earlier pages
+        if i < skip {
+            continue;
+        }
+
+        // Stop once we filled the page
+        if result.len() >= per_page {
+            break;
+        }
+
         let commit = repo
             .find_commit(info.id)
             .with_context(|| format!("could not load commit {}", info.id))?;

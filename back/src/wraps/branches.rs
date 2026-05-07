@@ -6,7 +6,7 @@
 //! unless the reference is a tag (branches always point directly to commits).
 
 use anyhow::Context as _;
-use gix::{ObjectId, Repository, bstr::ByteSlice as _, refs::Category};
+use gix::{ObjectId, Repository, bstr::ByteSlice, refs::Category};
 
 /// A local branch (e.g. `main`, `feature/auth`).
 #[derive(Debug, Clone)]
@@ -83,13 +83,13 @@ pub fn list_branches(repo: &Repository) -> Result<BranchListing, anyhow::Error> 
 /// Split `"origin/main"` → `("origin", "main")`.
 /// Branch names can themselves contain `/`, so we split only on the *first* one.
 fn split_remote_branch(short: &gix::bstr::BStr) -> (String, String) {
-    match short.find_byte(b'/') {
-        Some(i) => (
-            short[..i].to_str_lossy().into_owned(),
-            short[i + 1..].to_str_lossy().into_owned(),
-        ),
-        // Shouldn't happen for a well-formed remote-tracking ref, but degrade
-        // gracefully rather than panicking.
-        None => (short.to_str_lossy().into_owned(), String::new()),
-    }
+    short.find_byte(b'/').map_or_else(
+        || (short.to_str_lossy().into_owned(), String::new()),
+        |i| {
+            (
+                short[..i].to_str_lossy().into_owned(),
+                short[i + 1..].to_str_lossy().into_owned(),
+            )
+        },
+    )
 }

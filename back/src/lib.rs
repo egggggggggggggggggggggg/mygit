@@ -2,6 +2,7 @@ pub mod routes;
 pub mod wraps;
 
 use moka::future::Cache;
+use serde::Deserialize;
 use sqlx::PgPool;
 use std::{fs, mem::size_of, path::PathBuf, sync::Arc, time::Duration};
 
@@ -14,7 +15,6 @@ pub struct AppState {
 
 #[derive(Clone)]
 pub struct Tree {}
-
 #[derive(Clone)]
 pub struct RepoMeta {}
 
@@ -87,18 +87,18 @@ fn memory_limit_bytes() -> Option<u64> {
     }
     trimmed.parse::<u64>().ok()
 }
-#[cfg(not(target_os = "linux"))]
-fn memory_limit_bytes() -> Option<u64> {
-    None
-}
-
 fn estimate_blob_size(k: &BlobKey, v: &Arc<String>) -> u32 {
     let key_size = size_of::<uuid::Uuid>() + k.1.len();
     let value_size = size_of::<String>() + v.len();
     (key_size + value_size) as u32
 }
-
-fn estimate_tree_size(_tree: &Arc<Tree>) -> u32 {
+///MUST REPLACE
+const fn estimate_tree_size(_tree: &Arc<Tree>) -> u32 {
     // Replace with something real if Tree grows.
     8 * 1024
+}
+#[derive(Deserialize)]
+pub struct Pagination {
+    pub page: Option<usize>,
+    pub per_page: Option<usize>,
 }

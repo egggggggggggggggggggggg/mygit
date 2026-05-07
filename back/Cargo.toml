@@ -8,8 +8,9 @@ anyhow = "1.0.102"
 argon2 = "0.5.3"
 axum = {version = "0.8.9", features = ["macros", "multipart",]}
 base64 = "0.22.1"
+chrono = {version = "0.4.44", features = ["serde"]}
 dotenvy = "0.15.7"
-gix = {version = "0.83.0"}
+gix = {version = "0.83.0", features = ["serde"]}
 hex = "0.4.3"
 jsonwebtoken = "10.3.0"
 moka = {version = "0.12.15", features= ["future"]}
@@ -24,4 +25,4 @@ time = {version = "0.3.47", features = ["serde"]}
 tokio = {version = "1.52.0", features = ["full"]}
 tower = {version = "0.5.3", features = ["limit"]}
 tower-http = {version = "0.6.8", features = ["cors"]}
-uuid = {version = "1.23.1", features = ["v4", "serde" ]}
+uuid = {version = "1.23.1", features = ["v7", "serde" ]}
