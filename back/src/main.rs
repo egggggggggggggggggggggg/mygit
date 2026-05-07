@@ -1,5 +1,8 @@
 //Left a lot of notes around so it might look ugly.
 //The errors in this are really janky, but this is just to get it up and running.
+//Currently don't have any indexes, will add later if needed.
+//To satisfy the file upload requirement, I'll probably do something like a banner/profile pic or
+//smth.
 use axum::{
     Router,
     http::Method,
@@ -10,8 +13,9 @@ use back::{
     AppState, CacheLayer,
     routes::{
         auth::{login, refresh, signup},
-        issues::{create_issue, get_issue, list_issues, list_pulls, repo_tree, view_file},
-        repo::{create_repo, list_commits, repo_home, update_repo_metadata},
+        issues::{create_issue, get_issue, list_issues},
+        pulls::{create_pull, list_pulls},
+        repo::{create_repo, list_commits, repo_home, repo_tree, update_repo_metadata, view_file},
         users::user_profile,
     },
 };
@@ -54,6 +58,7 @@ async fn main() {
             .allow_methods([Method::GET, Method::PUT, Method::POST]);
     let rate_limit_layer = RateLimitLayer::new(10, Duration::from_secs(1));
     println!("Listening on {}", host_address);
+    //Serve
     let app = Router::new()
         .route("/", get(handler))
         .route("/refresh", get(refresh))
@@ -75,13 +80,13 @@ async fn main() {
         )
         .route("/:username/:repo/issues/:id", get(get_issue))
         // pulls
-        .route("/:username/:repo/pulls", get(list_pulls))
+        .route("/:username/:repo/pulls", get(list_pulls).post(create_pull))
         // browsing
         .route("/:username/:repo/tree/:branch/*path", get(repo_tree))
         .route("/:username/:repo/blob/:branch/*path", get(view_file))
         .with_state(state);
-    let _ = axum::serve(listener, app).await;
+    axum::serve(listener, app).await.unwrap();
 }
 async fn handler() -> Html<&'static str> {
-    Html("<h1>Hello, World!</h1>")
+    Html("<h1>Placeholder</h1>")
 }
