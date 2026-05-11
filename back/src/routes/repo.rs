@@ -1,19 +1,27 @@
 use crate::{
     AppState, Pagination,
     errors::ApiError,
-    routes::auth::{AuthUser, MaybeAuthUser},
-    wraps::{commits::commits_for_branch_paginated, read_file_at_commit},
+    routes::{
+        auth::{AuthUser, MaybeAuthUser},
+        has_access,
+    },
+    wraps::{
+        commits::commits_for_branch_paginated,
+        files::{Node, get_tree},
+        read_file_at_commit,
+    },
 };
 use axum::{
     Json,
-    extract::{Path, Query, State, multipart},
+    body::Body,
+    extract::{Path, Query, State},
+    http::Response,
 };
 use gix::{ObjectId, create::Kind};
+use reqwest::{StatusCode, header};
 use serde::Deserialize;
-use sqlx::PgPool;
 use std::fs;
 use std::sync::Arc;
-use uuid::Uuid;
 
 pub enum RepoErrors {
     NotFound,
@@ -139,45 +147,16 @@ pub async fn update_repo_metadata(
         "description": rec.description
     })))
 }
-#[axum::debug_handler]
 pub async fn list_commits(
     MaybeAuthUser(maybe_claims): MaybeAuthUser,
     State(state): State<Arc<AppState>>,
     Path((repo_owner, repo_name)): Path<(String, String)>,
     Query(pagination): Query<Pagination>,
-) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     let user_id = maybe_claims.map(|c| c.sub);
     // Access check
-    let has_access = sqlx::query_scalar!(
-        r#"
-        SELECT EXISTS (
-            SELECT 1
-            FROM repositories r
-            JOIN users u ON u.id = r.owner_id
-            WHERE u.username = $1
-                AND r.name = $2
-                AND (
-                    r.is_private = false
-                    OR r.owner_id = $3
-                    OR EXISTS (
-                        SELECT 1
-                        FROM repository_collaborators rc
-                        WHERE rc.repository_id = r.id
-                            AND rc.user_id = $3
-                    )
-              )
-        )
-        "#,
-        repo_owner,
-        repo_name,
-        user_id
-    )
-    .fetch_one(&state.pool)
-    .await
-    .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?
-    .unwrap_or(false);
-    if !has_access {
-        return Err(axum::http::StatusCode::NOT_FOUND); // GitHub-style
+    if !has_access(&state.pool, &repo_owner, &repo_name, user_id).await? {
+        return Err(ApiError::Unauthorized);
     }
     //Page should not be limited to 1  but the total amount of commits.
     //Repo meta data should return the amount of commits and issues which avoids having to process
@@ -191,108 +170,54 @@ pub async fn list_commits(
         &repo, "main", // or resolve default branch properly
         page, per_page,
     )
-    .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
-
+    .map_err(|_| ApiError::CommitListingFailed)?;
     Ok(Json(serde_json::json!({
         "commits": commits,
     })))
 }
-use thiserror::Error;
-
 ///A lot of these are gix errors cuz gix doesn't define a centralized error enum.
-#[derive(Debug, Error)]
-pub enum GixError {
-    #[error("failed to open repository")]
-    OpenRepo(#[from] gix::open::Error),
-
-    #[error("failed to read HEAD")]
-    ReadHead(#[from] gix::reference::find::existing::Error),
-
-    #[error("failed to resolve revision")]
-    ResolveRev(#[from] gix::revision::spec::parse::single::Error),
-
-    #[error("failed to peel to commit")]
-    PeelCommit(#[from] gix::head::peel::to_commit::Error),
-
-    #[error("failed to peel to object")]
-    PeelObject(#[from] gix::head::peel::to_object::Error),
-
-    #[error("failed to acquire specified object")]
-    AcquireObject(#[from] gix::object::commit::Error),
-
-    #[error("failed to lookup")]
-    Lookup(#[from] gix::objs::find::existing::Error),
-
-    #[error("item does not exist")]
-    MissingItem,
-}
 #[derive(Deserialize)]
 pub struct InnerRoute {
     owner: String,
     name: String,
-    branch: String,
     path: String,
+    id: ObjectId,
 }
-
+#[axum::debug_handler]
 pub async fn repo_tree(
     MaybeAuthUser(claims): MaybeAuthUser,
     State(state): State<Arc<AppState>>,
     Path(route): Path<InnerRoute>,
-) {
-    let user_id = claims.map(|c| c.sub);
-}
-pub async fn has_access(
-    pool: &PgPool,
-    repo_owner: &str,
-    repo_name: &str,
-    user_id: Option<Uuid>,
-) -> Result<bool, ApiError> {
-    Ok(sqlx::query_scalar!(
-        r#"
-        SELECT EXISTS (
-            SELECT 1
-            FROM repositories r
-            JOIN users u ON u.id = r.owner_id
-            WHERE u.username = $1
-                AND r.name = $2
-                AND (
-                    r.is_private = false
-                    OR r.owner_id = $3
-                    OR EXISTS (
-                        SELECT 1
-                        FROM repository_collaborators rc
-                        WHERE rc.repository_id = r.id
-                            AND rc.user_id = $3
-                    )
-              )
-        )
-        "#,
-        repo_owner,
-        repo_name,
-        user_id
-    )
-    .fetch_one(pool)
-    .await?
-    .unwrap_or(false))
-}
-pub async fn view_file(
-    MaybeAuthUser(claims): MaybeAuthUser,
-    State(state): State<Arc<AppState>>,
-    Path((route, id)): Path<(InnerRoute, ObjectId)>,
-) -> Result<(), ApiError> {
+) -> Result<Json<Node>, ApiError> {
     let user_id = claims.map(|c| c.sub);
     if !has_access(&state.pool, &route.owner, &route.name, user_id).await? {
         return Err(ApiError::Unauthorized);
     }
     let path = state.git_storage.join(&route.owner).join(&route.name);
     let repo = gix::open(&path).map_err(|_| ApiError::RepoNotFound)?;
-    let file = read_file_at_commit(&repo, id, &route.path).map_err(|_| ApiError::RepoNotFound)?;
-    let stream = FramedRead::new(file, BytesCodec::new());
-    let body = reqwest::Body::wrap_stream(stream);
-    let part = reqwest::multipart::Part::stream(value)
-    reqwest::multipart::Form::new().part(file, part);
-
-    Ok(())
+    Ok(Json(
+        get_tree(&repo, route.id, "").map_err(|_| ApiError::Internal)?,
+    ))
+}
+pub async fn view_file(
+    MaybeAuthUser(claims): MaybeAuthUser,
+    State(state): State<Arc<AppState>>,
+    Path(route): Path<InnerRoute>,
+) -> Result<Response<Body>, ApiError> {
+    let user_id = claims.map(|c| c.sub);
+    if !has_access(&state.pool, &route.owner, &route.name, user_id).await? {
+        return Err(ApiError::Unauthorized);
+    }
+    let path = state.git_storage.join(&route.owner).join(&route.name);
+    let repo = gix::open(&path).map_err(|_| ApiError::RepoNotFound)?;
+    let file =
+        read_file_at_commit(&repo, route.id, &route.path).map_err(|_| ApiError::RepoNotFound)?;
+    let body = Body::from(file);
+    Ok(Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "application/octet-stream")
+        .body(body)
+        .unwrap())
 }
 fn init_bare_repo(path: &std::path::Path) -> Result<(), anyhow::Error> {
     fs::create_dir_all(path)?;

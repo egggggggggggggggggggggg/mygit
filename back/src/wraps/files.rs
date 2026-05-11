@@ -17,9 +17,12 @@
 use anyhow::{Context as _, bail};
 use gix::{
     ObjectId, Repository,
-    bstr::{BStr, ByteSlice as _},
-    objs::tree::EntryKind,
+    bstr::{BStr, ByteSlice},
+    objs::{FindExt, tree::EntryKind},
 };
+use serde::Serialize;
+
+use crate::wraps::GixError;
 
 // ── Public API ────────────────────────────────────────────────────────────────
 
@@ -113,4 +116,94 @@ pub fn file_exists_at_commit(
 
     Ok(entry
         .is_some_and(|e| matches!(e.mode().kind(), EntryKind::Blob | EntryKind::BlobExecutable)))
+}
+#[derive(Debug, Serialize)]
+#[serde(tag = "type")]
+pub enum Node {
+    File { name: String, oid: String },
+    Directory { name: String, children: Vec<Node> },
+    Submodule { name: String, oid: String },
+}
+pub fn get_tree(repo: &Repository, commit_id: ObjectId, name: &str) -> Result<Node, GixError> {
+    let commit = repo.find_commit(commit_id)?;
+    let tree = commit.tree()?;
+    build_tree(repo, &tree, name)
+}
+pub fn build_tree(repo: &gix::Repository, tree: &gix::Tree, name: &str) -> Result<Node, GixError> {
+    let mut children = Vec::new();
+    for entry in tree.iter() {
+        let entry = entry.map_err(|_| GixError::Unimplemented)?;
+        let entry_name = entry.filename().to_string();
+
+        match entry.mode().kind() {
+            EntryKind::Blob => {
+                children.push(Node::File {
+                    name: entry_name,
+                    oid: entry.oid().to_string(),
+                });
+            }
+            EntryKind::Tree => {
+                let subtree = repo.find_object(entry.oid())?.into_tree();
+
+                let node = build_tree(repo, &subtree, &entry_name)?;
+
+                children.push(node);
+            }
+            EntryKind::Commit => {
+                children.push(Node::Submodule {
+                    name: entry_name,
+                    oid: entry.oid().to_string(),
+                });
+            }
+
+            _ => {}
+        }
+    }
+    Ok(Node::Directory {
+        name: name.to_string(),
+        children,
+    })
+}
+#[derive(Debug)]
+pub struct BlobEntry {
+    pub path: String,
+    pub oid: String,
+}
+
+pub fn collect_blobs(
+    repo: &gix::Repository,
+    tree: &gix::Tree,
+    prefix: &str,
+    out: &mut Vec<BlobEntry>,
+) -> anyhow::Result<()> {
+    for entry in tree.iter() {
+        let entry = entry?;
+        let name = entry.filename().to_string();
+
+        let path = if prefix.is_empty() {
+            name.clone()
+        } else {
+            format!("{}/{}", prefix, name)
+        };
+        match entry.mode().kind() {
+            EntryKind::Blob => {
+                out.push(BlobEntry {
+                    path,
+                    oid: entry.oid().to_string(),
+                });
+            }
+            EntryKind::Tree => {
+                let subtree = repo.find_object(entry.oid())?.into_tree();
+
+                collect_blobs(repo, &subtree, &path, out)?;
+            }
+            EntryKind::Commit => {
+                // submodule
+            }
+
+            _ => {}
+        }
+    }
+
+    Ok(())
 }

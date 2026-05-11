@@ -14,9 +14,6 @@ struct ErrorResponse {
 
 #[derive(Debug, Error)]
 pub enum ApiError {
-    //
-    // Auth
-    //
     #[error("invalid credentials")]
     InvalidCredentials,
 
@@ -54,6 +51,9 @@ pub enum ApiError {
 
     #[error("internal server error")]
     Internal,
+
+    #[error("commits listing for branch failed")]
+    CommitListingFailed,
 }
 
 //
@@ -88,6 +88,8 @@ impl IntoResponse for ApiError {
             ApiError::Database => (StatusCode::INTERNAL_SERVER_ERROR, "database_error"),
 
             ApiError::Internal => (StatusCode::INTERNAL_SERVER_ERROR, "internal_error"),
+
+            ApiError::CommitListingFailed => (StatusCode::BAD_REQUEST, "listing commits failed"),
         };
 
         tracing::error!(

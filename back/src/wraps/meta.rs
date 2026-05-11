@@ -6,14 +6,11 @@ pub fn commit_count_from_ref(repo: &Repository, rev: &str) -> Result<usize, anyh
         .rev_parse_single(rev)
         .with_context(|| format!("could not resolve '{rev}'"))?
         .detach();
-
     let walk = repo
         .rev_walk([tip])
         .all()
         .context("failed to start revision walk")?;
-
     let mut count = 0usize;
-
     for item in walk {
         item.context("rev walk failed")?;
         count += 1;
@@ -23,7 +20,6 @@ pub fn commit_count_from_ref(repo: &Repository, rev: &str) -> Result<usize, anyh
 }
 pub fn total_commit_count(repo: &Repository) -> Result<usize, anyhow::Error> {
     let mut seen = std::collections::HashSet::new();
-
     for head in repo.references()?.all()? {
         let head = head.unwrap();
         let id = head.id().detach();
@@ -34,7 +30,6 @@ pub fn total_commit_count(repo: &Repository) -> Result<usize, anyhow::Error> {
             seen.insert(item.id);
         }
     }
-
     Ok(seen.len())
 }
 pub struct RefData {

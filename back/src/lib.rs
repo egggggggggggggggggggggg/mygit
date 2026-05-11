@@ -1,10 +1,13 @@
 pub mod errors;
 pub mod routes;
 pub mod wraps;
+use gix::ObjectId;
 use moka::future::Cache;
 use serde::Deserialize;
 use sqlx::PgPool;
 use std::{fs, mem::size_of, path::PathBuf, sync::Arc, time::Duration};
+
+use crate::wraps::CommitInfo;
 
 pub struct AppState {
     pub pool: PgPool,
@@ -17,17 +20,24 @@ pub struct AppState {
 pub struct Tree {}
 #[derive(Clone)]
 pub struct RepoMeta {}
+#[derive(Clone)]
 
-///Horribly designed with the keys, should replace with referential types
+//Horribly designed with the keys, should replace with referential types
+//For another cache type maybe auth related stuff like refresh tokens? Might not be suitable as
+//either way the db auth tables need to be updated.
 pub struct CacheLayer {
     pub trees: Cache<TreeKey, Arc<Tree>>,
     pub blobs: Cache<BlobKey, Arc<String>>,
     pub repo_meta: Cache<uuid::Uuid, Arc<RepoMeta>>,
+    //This cache is only for commit metadata and not an actual reference/thing into the git repo.
+    //I think that cache should be a simple HashMap as the data is arbitrary size.
+    pub commits: Cache<CommitKey, Arc<CommitInfo>>,
 }
 
 type TreeKey = (uuid::Uuid, String, String);
 type BlobKey = (uuid::Uuid, String);
-
+//Commit hash + (repository name + username)
+type CommitKey = (ObjectId, String);
 impl CacheLayer {
     pub fn new() -> Self {
         let memory_limit = memory_limit_bytes().unwrap_or(1024 * 1024 * 1024); // 1 GiB fallback
@@ -37,9 +47,10 @@ impl CacheLayer {
 
         // Split intentionally:
         // blobs dominate memory usage.
-        let blob_budget = total_cache_budget * 70 / 100;
+        let blob_budget = total_cache_budget * 40 / 100;
         let tree_budget = total_cache_budget * 20 / 100;
         let meta_budget = total_cache_budget * 10 / 100;
+        let commit_budget = total_cache_budget * 30 / 100;
 
         let trees = Cache::builder()
             .max_capacity(tree_budget)
@@ -58,11 +69,16 @@ impl CacheLayer {
             .weigher(|_k: &uuid::Uuid, _v: &Arc<RepoMeta>| -> u32 { size_of::<RepoMeta>() as u32 })
             .time_to_live(Duration::from_hours(1))
             .build();
-
+        let commits = Cache::builder()
+            .max_capacity(commit_budget)
+            .weigher(|_k, _v| -> u32 { size_of::<CommitInfo>() as u32 })
+            .time_to_idle(Duration::from_mins(1))
+            .build();
         Self {
             trees,
             blobs,
             repo_meta,
+            commits,
         }
     }
 }
@@ -101,10 +117,4 @@ const fn estimate_tree_size(_tree: &Arc<Tree>) -> u32 {
 pub struct Pagination {
     pub page: Option<usize>,
     pub per_page: Option<usize>,
-}
-
-#[cfg(test)]
-mod tests {
-    #[tokio::test]
-    async fn test() {}
 }

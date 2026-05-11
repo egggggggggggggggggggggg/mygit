@@ -7,7 +7,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
-use time::{PrimitiveDateTime, Time};
+use time::PrimitiveDateTime;
 use uuid::Uuid;
 
 use crate::{
