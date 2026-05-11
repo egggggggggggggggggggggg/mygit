@@ -14,7 +14,7 @@ use {
         response::IntoResponse,
     },
     base64::{Engine as _, engine::general_purpose},
-    chrono::{Duration, Utc},
+    chrono::Duration,
     jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header, Validation, decode, encode},
     serde::{Deserialize, Serialize},
     sha2::{Digest, Sha256},
@@ -23,29 +23,75 @@ use {
     time::OffsetDateTime,
     uuid::Uuid,
 };
+
 #[derive(thiserror::Error, Debug)]
 pub enum AuthError {
     #[error("invalid credentials")]
     InvalidCredentials,
+
     #[error("token expired")]
     TokenExpired,
-    #[error("database error")]
-    Database(#[from] sqlx::Error),
-    #[error("jwt error")]
-    Jwt(#[from] jsonwebtoken::errors::Error),
-    #[error("token generation error")]
+
+    #[error("missing header: {0}")]
+    MissingHeader(&'static str),
+
+    #[error("duplicate email")]
+    DuplicateEmail,
+
+    #[error("duplicate username")]
+    DuplicateUsername,
+
+    #[error("invalid input: {0}")]
+    InvalidInput(&'static str),
+
+    #[error("password hashing failed")]
+    PasswordHashing,
+
+    #[error("password verification failed")]
+    PasswordVerification,
+
+    #[error("token generation failed")]
     TokenGen,
+
+    #[error("database error: {0}")]
+    Database(#[from] sqlx::Error),
+
+    #[error("jwt error: {0}")]
+    Jwt(#[from] jsonwebtoken::errors::Error),
 }
-//TODO: Will replace &'static str with an actual error enum for returning.
+
+impl IntoResponse for AuthError {
+    fn into_response(self) -> axum::response::Response {
+        let (status, msg) = match &self {
+            AuthError::InvalidCredentials => (StatusCode::UNAUTHORIZED, self.to_string()),
+            AuthError::TokenExpired => (StatusCode::UNAUTHORIZED, self.to_string()),
+            AuthError::MissingHeader(_) => (StatusCode::BAD_REQUEST, self.to_string()),
+            AuthError::DuplicateEmail | AuthError::DuplicateUsername => {
+                (StatusCode::CONFLICT, self.to_string())
+            }
+            AuthError::InvalidInput(_) => (StatusCode::BAD_REQUEST, self.to_string()),
+            AuthError::PasswordHashing | AuthError::PasswordVerification => {
+                (StatusCode::INTERNAL_SERVER_ERROR, self.to_string())
+            }
+            AuthError::TokenGen => (StatusCode::INTERNAL_SERVER_ERROR, self.to_string()),
+            AuthError::Database(_) => (StatusCode::INTERNAL_SERVER_ERROR, self.to_string()),
+            AuthError::Jwt(_) => (StatusCode::UNAUTHORIZED, self.to_string()),
+        };
+
+        (status, msg).into_response()
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Claims {
     pub sub: uuid::Uuid,
-    pub exp: chrono::DateTime<Utc>,
-    pub iat: chrono::DateTime<Utc>,
+    pub exp: i64,
+    pub iat: i64,
     pub iss: String,
     pub aud: String,
     pub jti: Uuid,
 }
+
 #[derive(Debug, Deserialize)]
 pub struct SignupRequest {
     pub email: String,
@@ -55,33 +101,63 @@ pub struct SignupRequest {
 
 #[derive(Debug, Deserialize)]
 pub struct LoginRequest {
-    pub identifier: String, // email OR username
+    pub identifier: String,
     pub password: String,
 }
-//The return statement is probably dumb
+
+#[derive(Debug, Serialize)]
+pub struct AuthResponse {
+    pub access_token: String,
+    pub refresh_token: String,
+}
+
+impl IntoResponse for AuthResponse {
+    fn into_response(self) -> axum::response::Response {
+        (StatusCode::OK, Json(self)).into_response()
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RefreshRequest {
+    pub refresh_token: String,
+}
+
+fn map_sqlx_error(err: sqlx::Error) -> AuthError {
+    if let sqlx::Error::Database(db_err) = &err
+        && db_err.code().as_deref() == Some("23505")
+    {
+        return match db_err.constraint() {
+            Some("users_email_key") => AuthError::DuplicateEmail,
+            Some("users_username_key") => AuthError::DuplicateUsername,
+            _ => AuthError::Database(err),
+        };
+    }
+    AuthError::Database(err)
+}
+
 pub fn generate_access_token(user_id: Uuid, secret: &'static [u8]) -> Result<String, AuthError> {
     let now = chrono::Utc::now();
     let claims = Claims {
         sub: user_id,
-        exp: now + Duration::minutes(10),
-        iat: now,
+        exp: (now + Duration::minutes(10)).timestamp(),
+        iat: now.timestamp(),
         iss: "my-api".to_string(),
         aud: "my-app".to_string(),
         jti: Uuid::new_v4(),
     };
+
     Ok(encode(
         &Header::new(Algorithm::HS256),
         &claims,
         &EncodingKey::from_secret(secret),
     )?)
 }
+
 pub fn verify_token(token: &str, secret: &'static [u8]) -> Result<Claims, AuthError> {
     let mut validation = Validation::new(Algorithm::HS256);
-    // required claims
     validation.validate_exp = true;
     validation.set_audience(&["my-app"]);
     validation.set_issuer(&["my-api"]);
-    // optional but recommended
     validation.required_spec_claims = std::collections::HashSet::from([
         "exp".to_string(),
         "iat".to_string(),
@@ -91,17 +167,21 @@ pub fn verify_token(token: &str, secret: &'static [u8]) -> Result<Claims, AuthEr
         "jti".to_string(),
     ]);
     validation.leeway = 30;
+
     let token_data = decode::<Claims>(token, &DecodingKey::from_secret(secret), &validation)?;
     Ok(token_data.claims)
 }
+
 pub fn generate_refresh_token() -> String {
-    let mut bytes = [0u8; 32]; // 256-bit
+    let mut bytes = [0u8; 32];
     OsRng.fill_bytes(&mut bytes);
     general_purpose::URL_SAFE_NO_PAD.encode(bytes)
 }
+
 pub fn hash_refresh_token(token: &str) -> String {
     hex::encode(Sha256::digest(token.as_bytes()))
 }
+
 pub async fn store_refresh_token<'e, E>(
     executor: E,
     user_id: uuid::Uuid,
@@ -112,6 +192,7 @@ where
 {
     let token_hash = hash_refresh_token(token);
     let expires_at = OffsetDateTime::now_utc() + time::Duration::days(7);
+
     sqlx::query!(
         r#"
         INSERT INTO refresh_tokens (user_id, token_hash, expires_at)
@@ -122,30 +203,51 @@ where
         expires_at
     )
     .execute(executor)
-    .await?;
+    .await
+    .map_err(AuthError::Database)?;
+
     Ok(())
 }
-pub fn hash_password(password: &str) -> Result<String, &'static str> {
+
+pub fn hash_password(password: &str) -> Result<String, AuthError> {
     let salt = SaltString::generate(&mut OsRng);
     let hash = Argon2::default()
         .hash_password(password.as_bytes(), &salt)
-        .map_err(|_| "Failed to hash the password")?
+        .map_err(|_| AuthError::PasswordHashing)?
         .to_string();
+
     Ok(hash)
 }
-pub fn verify_password(password: &str, hash: &str) -> Result<bool, &'static str> {
-    let parsed_hash = PasswordHash::new(hash).map_err(|_| "invalid stored hash")?;
+
+pub fn verify_password(password: &str, hash: &str) -> Result<bool, AuthError> {
+    let parsed_hash = PasswordHash::new(hash).map_err(|_| AuthError::InvalidCredentials)?;
     Ok(Argon2::default()
         .verify_password(password.as_bytes(), &parsed_hash)
         .is_ok())
 }
+
+pub fn auth_required(auth_header: &str, secret: &'static [u8]) -> Result<Claims, AuthError> {
+    let token = auth_header
+        .strip_prefix("Bearer ")
+        .ok_or(AuthError::InvalidCredentials)?;
+
+    verify_token(token, secret)
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct LoginResponse {
+    pub access_token: String,
+    pub refresh_token: String,
+}
+
 #[axum::debug_handler]
 pub async fn login(
     State(state): State<Arc<AppState>>,
     Json(req): Json<LoginRequest>,
-) -> Result<AuthResponse, &'static str> {
-    //Might wanna replace this. This is bcrypt not argon2.
-    const DUMMY_HASH: &str = "$2b$12$C6UzMDM.H6dfI/f/IKcEeO1Yp9rj5l9FQ8s8JrIoYNewc19hXtF8K";
+) -> Result<AuthResponse, AuthError> {
+    const DUMMY_HASH: &str =
+        "$argon2id$v=19$m=19456,t=2,p=1$c29tZXNhbHQ$7vQm0zFjI4G0g8m1QqY6K6v6T6XQ3V8lYQv8h0w5W0A";
+
     let user = sqlx::query!(
         r#"
         SELECT id, password_hash
@@ -156,53 +258,61 @@ pub async fn login(
     )
     .fetch_optional(&state.pool)
     .await
-    .map_err(|_| "db error")?;
-    // Always verify password, even if user doesn't exist
+    .map_err(AuthError::Database)?;
+
     let (user_id, password_hash) = match user {
         Some(u) => (Some(u.id), u.password_hash),
         None => (None, DUMMY_HASH.to_string()),
     };
-    let is_valid = verify_password(&req.password, &password_hash).map_err(|_| "auth error")?;
+
+    let is_valid = verify_password(&req.password, &password_hash)?;
     if user_id.is_none() || !is_valid {
-        return Err("invalid credentials");
+        return Err(AuthError::InvalidCredentials);
     }
+
     let user_id = user_id.unwrap();
-    let access_token =
-        generate_access_token(user_id, state.jwt_secret).map_err(|_| "Failed to create token")?;
+    let access_token = generate_access_token(user_id, state.jwt_secret)?;
     let refresh_token = generate_refresh_token();
-    store_refresh_token(&state.pool, user_id, &refresh_token)
-        .await
-        .map_err(|_| "Failed to store refresh token")?;
+    store_refresh_token(&state.pool, user_id, &refresh_token).await?;
+
     Ok(AuthResponse {
         access_token,
         refresh_token,
     })
 }
+
 #[axum::debug_handler]
 pub async fn logout(
     State(state): State<Arc<AppState>>,
     Json(req): Json<RefreshRequest>,
-) -> Result<(), &'static str> {
+) -> Result<(), AuthError> {
     let token_hash = hash_refresh_token(&req.refresh_token);
+
     sqlx::query!(
         "DELETE FROM refresh_tokens WHERE token_hash = $1",
         token_hash
     )
     .execute(&state.pool)
     .await
-    .map_err(|_| "db error")?;
+    .map_err(AuthError::Database)?;
+
     Ok(())
 }
-///This should be able to perform duplication checks.
+
+#[axum::debug_handler]
 pub async fn signup(
     State(state): State<Arc<AppState>>,
     Json(req): Json<SignupRequest>,
-) -> Result<AuthResponse, &'static str> {
+) -> Result<AuthResponse, AuthError> {
     if req.password.len() < 8 {
-        return Err("password too short");
+        return Err(AuthError::InvalidInput(
+            "password must be at least 8 characters",
+        ));
     }
+
     let email = req.email.to_lowercase();
     let password_hash = hash_password(&req.password)?;
+
     let user_id = sqlx::query_scalar!(
         r#"
         INSERT INTO users (email, username, password_hash)
@@ -215,63 +325,26 @@ pub async fn signup(
     )
     .fetch_one(&state.pool)
     .await
-    .map_err(|e| {
-        if let sqlx::Error::Database(db_err) = &e
-            && db_err.code().as_deref() == Some("23505")
-        {
-            if let Some(constraint) = db_err.constraint() {
-                return match constraint {
-                    "users_email_key" => "email already in use",
-                    "users_username_key" => "username already in use",
-                    _ => "user already exists",
-                };
-            }
-            return "user already exists";
-        }
-        "Interal server error"
-    })?;
-    let access_token =
-        generate_access_token(user_id, state.jwt_secret).map_err(|_| "Failed to create a token")?;
+    .map_err(map_sqlx_error)?;
+
+    let access_token = generate_access_token(user_id, state.jwt_secret)?;
     let refresh_token = generate_refresh_token();
-    store_refresh_token(&state.pool, user_id, &refresh_token)
-        .await
-        .map_err(|_| "Failed to store refresh token")?;
+    store_refresh_token(&state.pool, user_id, &refresh_token).await?;
+
     Ok(AuthResponse {
         access_token,
         refresh_token,
     })
 }
-#[derive(Debug, Serialize)]
-pub struct AuthResponse {
-    pub access_token: String,
-    pub refresh_token: String,
-}
-impl IntoResponse for AuthResponse {
-    fn into_response(self) -> axum::response::Response {
-        (StatusCode::OK, Json(self)).into_response()
-    }
-}
-#[derive(Debug, Deserialize)]
-pub struct RefreshRequest {
-    pub refresh_token: String,
-}
+
 #[axum::debug_handler]
-//Refresh endpoint. General idea is the user calls this endpoint to get a new access token when the
-//previous one has expired. First it fetches the requested refresh token from the hash. It checks
-//for expiration and if expired returns an Err forcing the user to login again to get a new one. If
-//not it rotates itself by deleting the old one and creating a new one. It then returns an access_token
-//along with the refresh_token. The rotation stuff utilizes a db transaction. Not entirely sure if
-//it's a good idea but it seems good on paper.
 pub async fn refresh(
     State(state): State<Arc<AppState>>,
     Json(req): Json<RefreshRequest>,
-) -> Result<AuthResponse, &'static str> {
+) -> Result<AuthResponse, AuthError> {
     let token_hash = hash_refresh_token(&req.refresh_token);
-    let mut tx = state
-        .pool
-        .begin()
-        .await
-        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR.as_str())?;
+    let mut tx = state.pool.begin().await.map_err(AuthError::Database)?;
+
     let record = sqlx::query!(
         r#"
         SELECT id, user_id, expires_at
@@ -282,36 +355,34 @@ pub async fn refresh(
     )
     .fetch_optional(&mut *tx)
     .await
-    .map_err(|_| "db error")?;
-    let record = record.ok_or("invalid token")?;
+    .map_err(AuthError::Database)?
+    .ok_or(AuthError::InvalidCredentials)?;
+
     if record.expires_at < OffsetDateTime::now_utc() {
-        return Err("Refresh token expired");
+        return Err(AuthError::TokenExpired);
     }
+
     sqlx::query!("DELETE FROM refresh_tokens WHERE id = $1", record.id)
         .execute(&mut *tx)
         .await
-        .map_err(|_| "db error")?;
+        .map_err(AuthError::Database)?;
+
     let new_refresh = generate_refresh_token();
-    store_refresh_token(&mut *tx, record.user_id, &new_refresh)
-        .await
-        .map_err(|_| "db error")?;
-    tx.commit().await.map_err(|_| "Transaction failed")?;
-    let access_token = generate_access_token(record.user_id, state.jwt_secret)
-        .map_err(|_| "Failed to create token")?;
+    store_refresh_token(&mut *tx, record.user_id, &new_refresh).await?;
+    tx.commit().await.map_err(AuthError::Database)?;
+
+    let access_token = generate_access_token(record.user_id, state.jwt_secret)?;
     Ok(AuthResponse {
         access_token,
         refresh_token: new_refresh,
     })
 }
-pub fn auth_required(auth_header: &str, secret: &'static [u8]) -> Result<Claims, &'static str> {
-    let token = auth_header
-        .strip_prefix("Bearer ")
-        .ok_or("missing bearer token")?;
-    verify_token(token, secret).map_err(|_| "invalid token")
-}
+
 pub struct AuthUser(pub Claims);
+
 impl FromRequestParts<Arc<AppState>> for AuthUser {
-    type Rejection = &'static str;
+    type Rejection = AuthError;
+
     async fn from_request_parts(
         parts: &mut Parts,
         state: &Arc<AppState>,
@@ -320,12 +391,14 @@ impl FromRequestParts<Arc<AppState>> for AuthUser {
             .headers
             .get(header::AUTHORIZATION)
             .and_then(|v| v.to_str().ok())
-            .ok_or("missing auth header")?;
+            .ok_or(AuthError::MissingHeader("Authorization"))?;
+
         Ok(Self(auth_required(auth_header, state.jwt_secret)?))
     }
 }
-///For routes where auth may not be neccesary.
+
 pub struct MaybeAuthUser(pub Option<Claims>);
+
 impl FromRequestParts<Arc<AppState>> for MaybeAuthUser {
     type Rejection = std::convert::Infallible;
 
@@ -335,9 +408,10 @@ impl FromRequestParts<Arc<AppState>> for MaybeAuthUser {
     ) -> Result<Self, Self::Rejection> {
         let claims = parts
             .headers
-            .get("Authorization")
+            .get(header::AUTHORIZATION)
             .and_then(|v| v.to_str().ok())
             .and_then(|auth_header| auth_required(auth_header, state.jwt_secret).ok());
+
         Ok(Self(claims))
     }
 }

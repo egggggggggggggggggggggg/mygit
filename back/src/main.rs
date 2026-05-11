@@ -3,20 +3,23 @@
 //Currently don't have any indexes, will add later if needed.
 //To satisfy the file upload requirement, I'll probably do something like a banner/profile pic or
 //smth.
+//A lot of redundant extractor ccode logic which involves verifying that the user can actually view
+//the repo. Could have it built into the extractor but currently the isuse is making multiple queries.
+//Trying to reduce queries to a single one per function. Might be worse in the long run as it hides
+//errors behind a database error making it more annoying to debug.
 use axum::{
     Router,
     http::Method,
-    response::Html,
     routing::{get, post},
 };
 use back::{
     AppState, CacheLayer,
     routes::{
-        auth::{login, refresh, signup},
+        auth::{login, logout, refresh, signup},
         issues::{create_issue, get_issue, list_issues},
         pulls::{create_pull, list_pulls},
         repo::{create_repo, list_commits, repo_home, repo_tree, update_repo_metadata, view_file},
-        users::user_profile,
+        users::{update_user, user_profile},
     },
 };
 use dotenvy::dotenv;
@@ -60,18 +63,20 @@ async fn main() {
     println!("Listening on {}", host_address);
     //Serve
     let app = Router::new()
-        .route("/", get(handler))
-        .route("/refresh", get(refresh))
-        .route("/login", get(login))
-        .route("/signup", get(signup))
-        // user
-        .route("/{username}", get(user_profile))
-        // repos
-        .route("/repos", post(create_repo))
+        // auth
+        .route("/auth/signup", post(signup))
+        .route("/auth/login", post(login))
+        .route("/auth/refresh", post(refresh))
+        .route("/auth/logout", post(logout))
+        // users
+        .route("/users/{username}", get(user_profile).patch(update_user))
+        // repositories
+        .route("/user/repos", post(create_repo))
         .route(
             "/{username}/{repo}",
             get(repo_home).patch(update_repo_metadata),
         )
+        // commits
         .route("/{username}/{repo}/commits", get(list_commits))
         // issues
         .route(
@@ -84,12 +89,9 @@ async fn main() {
             "/{username}/{repo}/pulls",
             get(list_pulls).post(create_pull),
         )
-        // browsing
+        // git browsing
         .route("/{username}/{repo}/tree/{branch}/{*path}", get(repo_tree))
         .route("/{username}/{repo}/blob/{branch}/{*path}", get(view_file))
         .with_state(state);
-    axum::serve(listener, app).await.unwrap();
-}
-async fn handler() -> Html<&'static str> {
-    Html("<h1>Placeholder</h1>")
+    axum::serve(listener, app).await.unwrap()
 }

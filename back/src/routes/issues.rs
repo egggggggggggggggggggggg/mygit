@@ -7,10 +7,13 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
-use time::Time;
+use time::{PrimitiveDateTime, Time};
 use uuid::Uuid;
 
-use crate::{AppState, Pagination, routes::auth::AuthUser};
+use crate::{
+    AppState, Pagination,
+    routes::auth::{AuthUser, MaybeAuthUser},
+};
 
 #[derive(Deserialize)]
 pub struct IssueCreation {
@@ -26,11 +29,11 @@ pub struct Issue {
     pub assignee_id: Option<Uuid>,
     pub title: String,
     pub body: Option<String>,
-    pub state: String,
+    pub state: Option<String>,
     pub number: i32,
-    pub closed_at: Option<Time>,
-    pub created_at: Time,
-    pub updated_at: Time,
+    pub closed_at: Option<PrimitiveDateTime>,
+    pub created_at: PrimitiveDateTime,
+    pub updated_at: PrimitiveDateTime,
 }
 
 #[derive(Serialize)]
@@ -53,16 +56,20 @@ pub struct IssuePath {
 ///Should first perform a repo access check so maybe this can be middleware?
 /// GET /repos/:owner/:repo/issues?page=1&per_page=20
 pub async fn list_issues(
+    MaybeAuthUser(maybe_claims): MaybeAuthUser,
     Path(path): Path<RepoPath>,
     Query(pagination): Query<Pagination>,
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<Vec<Issue>>, (StatusCode, String)> {
+    let user_id = maybe_claims.map(|c| c.sub);
     let page = pagination.page.unwrap_or(1).max(1);
     let per_page = pagination.per_page.unwrap_or(20).clamp(1, 100);
 
     let offset = ((page - 1) * per_page) as i64;
-
-    let issues = sqlx::query_as::<_, Issue>(
+    //This utilizes OFFSET which does not scale too well on large db. Might wanna replace with
+    //actual paging logic.
+    let issues = sqlx::query_as!(
+        Issue,
         r#"
         SELECT
             i.id,
@@ -83,24 +90,34 @@ pub async fn list_issues(
             ON u.id = r.owner_id
         WHERE u.username = $1
           AND r.name = $2
+          AND (
+                r.is_private = false
+                OR r.owner_id = $3
+                OR EXISTS (
+                    SELECT 1
+                    FROM repository_collaborators rc
+                    WHERE rc.repository_id = r.id
+                      AND rc.user_id = $3
+                )
+          )
         ORDER BY i.number DESC
-        LIMIT $3
-        OFFSET $4
+        LIMIT $4
+        OFFSET $5        
         "#,
+        &path.owner,
+        &path.repo,
+        user_id,
+        per_page as i64,
+        offset,
     )
-    .bind(&path.owner)
-    .bind(&path.repo)
-    .bind(per_page as i64)
-    .bind(offset)
     .fetch_all(&state.pool)
     .await
     .map_err(internal_error)?;
-
     Ok(Json(issues))
 }
 
 /// POST /repos/:owner/:repo/issues
-///
+/// This just isn't worth the loss in information.
 /// Requires authentication.
 #[axum::debug_handler]
 pub async fn create_issue(
@@ -184,10 +201,13 @@ pub async fn create_issue(
 
 /// GET /repos/:owner/:repo/issues/:number
 pub async fn get_issue(
+    MaybeAuthUser(maybe_claims): MaybeAuthUser,
     Path(path): Path<IssuePath>,
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<Issue>, (StatusCode, String)> {
-    let issue = sqlx::query_as::<_, Issue>(
+    let user_id = maybe_claims.map(|c| c.sub);
+    let issue = sqlx::query_as!(
+        Issue,
         r#"
         SELECT
             i.id,
@@ -207,13 +227,24 @@ pub async fn get_issue(
         INNER JOIN users u
             ON u.id = r.owner_id
         WHERE u.username = $1
-          AND r.name = $2
-          AND i.number = $3
+            AND r.name = $2          
+            AND (
+            r.is_private = false
+                OR r.owner_id = $3
+                OR EXISTS (
+                    SELECT 1
+                        FROM repository_collaborators rc
+                        WHERE rc.repository_id = r.id
+                            AND rc.user_id = $3
+                    )
+            )
+            AND i.number = $4
         "#,
+        &path.owner,
+        &path.repo,
+        user_id,
+        path.number,
     )
-    .bind(&path.owner)
-    .bind(&path.repo)
-    .bind(path.number)
     .fetch_optional(&state.pool)
     .await
     .map_err(internal_error)?

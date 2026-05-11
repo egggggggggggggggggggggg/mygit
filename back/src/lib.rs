@@ -1,6 +1,6 @@
+pub mod errors;
 pub mod routes;
 pub mod wraps;
-
 use moka::future::Cache;
 use serde::Deserialize;
 use sqlx::PgPool;
@@ -101,4 +101,10 @@ const fn estimate_tree_size(_tree: &Arc<Tree>) -> u32 {
 pub struct Pagination {
     pub page: Option<usize>,
     pub per_page: Option<usize>,
+}
+
+#[cfg(test)]
+mod tests {
+    #[tokio::test]
+    async fn test() {}
 }
