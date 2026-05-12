@@ -1,5 +1,6 @@
 CREATE TABLE repo_metadata (
-    repo_id            BIGINT PRIMARY KEY,
+
+    repository_id      UUID NOT NULL REFERENCES repositories(id) ON DELETE CASCADE,
     -- Git-derived cached stats
     commit_count       INTEGER NOT NULL DEFAULT 0,
     branch_count       INTEGER NOT NULL DEFAULT 0,

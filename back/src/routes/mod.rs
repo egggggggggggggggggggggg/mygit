@@ -1,8 +1,10 @@
 pub mod auth;
+pub mod comments;
 pub mod issues;
 pub mod pulls;
 pub mod repo;
 pub mod users;
+
 use sqlx::PgPool;
 use uuid::Uuid;
 

@@ -12,6 +12,7 @@ use crate::wraps::CommitInfo;
 pub struct AppState {
     pub pool: PgPool,
     pub git_storage: PathBuf,
+    pub file_storage: PathBuf,
     pub jwt_secret: &'static [u8],
     pub cache: CacheLayer,
 }

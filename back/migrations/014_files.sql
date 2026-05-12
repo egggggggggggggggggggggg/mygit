@@ -11,3 +11,4 @@ CREATE TABLE files (
 
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+-- include a hash field with type BYTEA maybe  

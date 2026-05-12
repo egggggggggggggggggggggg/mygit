@@ -7,6 +7,9 @@
 //the repo. Could have it built into the extractor but currently the isuse is making multiple queries.
 //Trying to reduce queries to a single one per function. Might be worse in the long run as it hides
 //errors behind a database error making it more annoying to debug.
+//A lot of these functions have multiple queries. If imma continue working on this I'll probably
+//try and optimize some of them into a single one. For the tables I threw uuid everywhere when
+//BIGSERIAL/SERIAL could've been fine.
 use axum::{
     Router,
     http::Method,
@@ -17,10 +20,11 @@ use back::{
     routes::{
         auth::{login, logout, refresh, signup},
         issues::{create_issue, get_issue, list_issues},
-        pulls::{create_pull, list_pulls},
+        pulls::{list_pulls, open_pull},
         repo::{create_repo, list_commits, repo_home, repo_tree, update_repo_metadata, view_file},
         users::{update_user, user_profile},
     },
+    wraps::storage::upload,
 };
 use dotenvy::dotenv;
 use sqlx::PgPool;
@@ -49,6 +53,8 @@ async fn main() {
     let state = Arc::new(AppState {
         pool: PgPool::connect(&db_url).await.unwrap(),
         git_storage,
+        //Placeholder
+        file_storage: PathBuf::new(),
         cache: CacheLayer::default(),
         jwt_secret: jwt_secret(),
     });
@@ -69,6 +75,7 @@ async fn main() {
         .route("/auth/refresh", post(refresh))
         .route("/auth/logout", post(logout))
         // users
+        .route("/upload", post(upload))
         .route("/users/{username}", get(user_profile).patch(update_user))
         // repositories
         .route("/user/repos", post(create_repo))
@@ -85,10 +92,7 @@ async fn main() {
         )
         .route("/{username}/{repo}/issues/{id}", get(get_issue))
         // pulls
-        .route(
-            "/{username}/{repo}/pulls",
-            get(list_pulls).post(create_pull),
-        )
+        .route("/{username}/{repo}/pulls", get(list_pulls).post(open_pull))
         // git browsing
         .route("/{username}/{repo}/tree/{branch}/{*path}", get(repo_tree))
         .route("/{username}/{repo}/blob/{branch}/{*path}", get(view_file))

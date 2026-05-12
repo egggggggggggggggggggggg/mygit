@@ -127,9 +127,8 @@ pub async fn create_issue(
     Json(payload): Json<IssueCreation>,
 ) -> Result<(StatusCode, Json<IssueResponse>), (StatusCode, String)> {
     let mut tx = state.pool.begin().await.map_err(internal_error)?;
-
     // Find repository
-    let repo_id: Option<Uuid> = sqlx::query_scalar(
+    let repo_id: Option<Uuid> = sqlx::query_scalar!(
         r#"
         SELECT r.id
         FROM repositories r
@@ -138,30 +137,30 @@ pub async fn create_issue(
         WHERE u.username = $1
           AND r.name = $2
         "#,
+        &path.owner,
+        &path.repo,
     )
-    .bind(&path.owner)
-    .bind(&path.repo)
     .fetch_optional(&mut *tx)
     .await
     .map_err(internal_error)?;
-
     let repo_id =
         repo_id.ok_or_else(|| (StatusCode::NOT_FOUND, "Repository not found".to_string()))?;
     //Might not be needed.
     // Generate next issue number scoped to repository
-    let next_number: i32 = sqlx::query_scalar(
+    let next_number = sqlx::query_scalar!(
         r#"
         UPDATE repositories
         SET next_issue_number = next_issue_number + 1
         WHERE id = $1
         RETURNING next_issue_number - 1
         "#,
+        repo_id,
     )
-    .bind(repo_id)
     .fetch_one(&mut *tx)
     .await
     .map_err(internal_error)?; // Insert issue
-    let issue = sqlx::query_as::<_, Issue>(
+    let issue = sqlx::query_as!(
+        Issue,
         r#"
         INSERT INTO issues (
             repository_id,
@@ -184,16 +183,15 @@ pub async fn create_issue(
             created_at,
             updated_at
         "#,
+        repo_id,
+        claims.sub,
+        &payload.title,
+        payload.body,
+        next_number
     )
-    .bind(repo_id)
-    .bind(claims.sub)
-    .bind(&payload.title)
-    .bind(&payload.body)
-    .bind(next_number)
     .fetch_one(&mut *tx)
     .await
     .map_err(internal_error)?;
-
     tx.commit().await.map_err(internal_error)?;
 
     Ok((StatusCode::CREATED, Json(IssueResponse { issue })))
