@@ -4,7 +4,6 @@ pub mod branches;
 pub mod commits;
 pub mod files;
 pub mod meta;
-pub mod storage;
 pub use branches::{BranchListing, LocalBranch, RemoteBranch, list_branches};
 pub use commits::{CommitInfo, commits_for_branch, commits_in_range};
 pub use files::read_file_at_commit;

@@ -1,13 +1,25 @@
 use axum::{
     Json,
-    extract::{Multipart, State},
+    body::Body,
+    extract::{Multipart, Query, State},
+    http::Response,
 };
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use sqlx::prelude::FromRow;
 use std::sync::Arc;
 use tokio::{fs, fs::File, io::AsyncWriteExt};
+use tokio_util::io::ReaderStream;
 use uuid::Uuid;
 
-use crate::{AppState, routes::auth::AuthUser};
+use crate::{
+    AppState,
+    errors::ApiError,
+    routes::{
+        auth::{AuthUser, MaybeAuthUser},
+        comments::CommentTarget,
+    },
+};
 
 #[axum::debug_handler]
 pub async fn upload(
@@ -16,9 +28,7 @@ pub async fn upload(
     mut multipart: Multipart,
 ) -> Result<Json<Vec<String>>, String> {
     let upload_root = state.file_storage.clone();
-
     let mut stored_paths = Vec::new();
-
     while let Some(mut field) = multipart.next_field().await.map_err(|e| e.to_string())? {
         // Read + hash into a temporary file first
         let mut size_bytes: i64 = 0;
@@ -83,6 +93,92 @@ pub async fn upload(
     }
     Ok(Json(stored_paths))
 }
+#[derive(Deserialize, Serialize, FromRow)]
+struct CommentInfo {
+    target_type: CommentTarget,
+    target_id: Uuid,
+}
+//The file cannot be orphaned. if it orphaned then the db should remove it.
+pub async fn get_file(
+    MaybeAuthUser(maybe_claims): MaybeAuthUser,
+    State(state): State<Arc<AppState>>,
+    Query(id): Query<Uuid>,
+) -> Result<(), ApiError> {
+    let user_id = maybe_claims.map(|c| c.sub);
+    ///Should return
+    let can_access = sqlx::query_scalar!(
+        r#"
+        SELECT EXISTS ( 
+            SELECT 1
+            FROM files f
+            JOIN comment_files cf ON cf.file_id = f.id
+            JOIN comments c ON c.id = cf.comment_id
+            JOIN repositories r ON r.id = c.repository_id
+            WHERE f.id = $1
+                AND (
+                    r.is_private = false
+                    OR r.owner_id = $2
+                    OR EXISTS (
+                        SELECT 1 
+                        FROM repository_collaborators rc 
+                        WHERE rc.repository_id = r.id 
+                            AND rc.user_id = $2
+                    )
+            )
+        )"#,
+        id,
+        user_id,
+    )
+    .fetch_one(&state.pool)
+    .await?
+    .unwrap_or(false);
+    if !can_access {
+        return Err(ApiError::Unauthorized);
+    }
+    let file = sqlx::query!(
+        r#"
+        SELECT
+            storage_key,
+            original_filename,
+            mime_type
+        FROM files
+        WHERE id = $1
+        "#,
+        id
+    )
+    .fetch_optional(&state.pool)
+    .await?
+    .ok_or(ApiError::RepoNotFound)?;
+    let path = state.file_storage.join(&file.storage_key);
+    let disk_file = File;
+    let stream = ReaderStream::new(disk_file);
+
+    let body = Body::from_stream(stream);
+
+    let mut response = Response::new(body);
+
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_str(&file.mime_type)
+            .unwrap_or(HeaderValue::from_static("application/octet-stream")),
+    );
+
+    response.headers_mut().insert(
+        header::CONTENT_DISPOSITION,
+        HeaderValue::from_str(&format!("inline; filename=\"{}\"", file.original_filename)).unwrap(),
+    );
+    //User has access to the resource. Start sending it over via multipart or octet stream.
+    //Will implement this later.
+    let body = Body::from("test");
+    Response::builder()
+        .header("Content-Type", "application/octet-stream")
+        .body(body)
+        .unwrap();
+    Ok(())
+}
+//Check for orhpaned files that don't
+pub async fn clean_files() {}
+
 //General process, user uploads file and frontend stages  it or smth.
 //In the meantime the frontend attempts to send the backend the image and have it be stored. Once
 //the backend successfully stored the image we can then set the associated file wit the associated

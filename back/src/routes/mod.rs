@@ -3,8 +3,8 @@ pub mod comments;
 pub mod issues;
 pub mod pulls;
 pub mod repo;
+pub mod storage;
 pub mod users;
-
 use sqlx::PgPool;
 use uuid::Uuid;
 

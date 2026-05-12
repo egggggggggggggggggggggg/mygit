@@ -14,6 +14,7 @@ pub struct AppState {
     pub git_storage: PathBuf,
     pub file_storage: PathBuf,
     pub jwt_secret: &'static [u8],
+    ///Ignoring implementing the cache for now.
     pub cache: CacheLayer,
 }
 

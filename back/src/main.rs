@@ -22,9 +22,9 @@ use back::{
         issues::{create_issue, get_issue, list_issues},
         pulls::{list_pulls, open_pull},
         repo::{create_repo, list_commits, repo_home, repo_tree, update_repo_metadata, view_file},
+        storage::{get_file, upload},
         users::{update_user, user_profile},
     },
-    wraps::storage::upload,
 };
 use dotenvy::dotenv;
 use sqlx::PgPool;
@@ -74,8 +74,9 @@ async fn main() {
         .route("/auth/login", post(login))
         .route("/auth/refresh", post(refresh))
         .route("/auth/logout", post(logout))
-        // users
+        //user should first upload the files before doing anything regarding a comment.
         .route("/upload", post(upload))
+        .route("/files/{id}", get(get_file))
         .route("/users/{username}", get(user_profile).patch(update_user))
         // repositories
         .route("/user/repos", post(create_repo))

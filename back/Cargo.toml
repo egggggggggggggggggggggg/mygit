@@ -28,4 +28,6 @@ tokio-util = "0.7.18"
 tower = {version = "0.5.3", features = ["limit"]}
 tower-http = {version = "0.6.8", features = ["cors"]}
 tracing = "0.1.44"
+utoipa = "5.5.0"
+utoipa-axum = "0.2.0"
 uuid = {version = "1.23.1", features = ["v7", "serde" ]}

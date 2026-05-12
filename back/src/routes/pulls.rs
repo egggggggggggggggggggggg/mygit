@@ -10,7 +10,7 @@ use crate::{
 };
 use axum::{
     Json, debug_handler,
-    extract::{FromRef, Path, State},
+    extract::{Path, State},
 };
 use serde::{Deserialize, Serialize};
 use sqlx::{Type, prelude::FromRow};
