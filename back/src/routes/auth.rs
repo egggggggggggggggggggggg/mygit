@@ -20,6 +20,7 @@ use {
     sqlx::{Executor, Postgres},
     std::sync::Arc,
     time::{Duration, OffsetDateTime},
+    utoipa::{IntoParams, ToSchema},
     uuid::Uuid,
 };
 
@@ -109,7 +110,7 @@ pub struct Claims {
     pub jti: Uuid,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema, IntoParams)]
 pub struct SignupRequest {
     pub email: String,
     pub username: String,
@@ -122,7 +123,7 @@ pub struct LoginRequest {
     pub password: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct AuthResponse {
     pub access_token: String,
     pub refresh_token: String,
@@ -314,8 +315,7 @@ pub async fn logout(
 
     Ok(())
 }
-
-#[axum::debug_handler]
+#[utoipa::path(post, path = "/auth/signup", responses((status = OK, body = AuthResponse)), params(SignupRequest))]
 pub async fn signup(
     State(state): State<Arc<AppState>>,
     Json(req): Json<SignupRequest>,

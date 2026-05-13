@@ -1,0 +1,12 @@
+ALTER TABLE pull_requests
+ALTER COLUMN closed_at 
+TYPE TIMESTAMPTZ;
+ALTER TABLE pull_requests
+ALTER COLUMN merged_at 
+TYPE TIMESTAMPTZ;
+ALTER TABLE pull_requests
+ALTER COLUMN created_at 
+TYPE TIMESTAMPTZ;
+ALTER TABLE pull_requests
+ALTER COLUMN updated_at 
+TYPE TIMESTAMPTZ;

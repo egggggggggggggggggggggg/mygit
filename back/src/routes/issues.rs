@@ -118,8 +118,6 @@ pub async fn list_issues(
 }
 
 /// POST /repos/:owner/:repo/issues
-/// This just isn't worth the loss in information.
-/// Requires authentication.
 #[axum::debug_handler]
 pub async fn create_issue(
     AuthUser(claims): AuthUser,

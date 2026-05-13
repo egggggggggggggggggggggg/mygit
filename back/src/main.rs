@@ -11,7 +11,6 @@
 //try and optimize some of them into a single one. For the tables I threw uuid everywhere when
 //BIGSERIAL/SERIAL could've been fine.
 use axum::{
-    Router,
     http::Method,
     routing::{get, post},
 };
@@ -21,7 +20,10 @@ use back::{
         auth::{login, logout, refresh, signup},
         issues::{create_issue, get_issue, list_issues},
         pulls::{close_pull, list_pulls, open_pull},
-        repo::{create_repo, list_commits, repo_home, repo_tree, update_repo_metadata, view_file},
+        repo::{
+            create_repo, delete_repo, list_commits, repo_home, repo_tree, update_repo_metadata,
+            view_file,
+        },
         storage::{get_file, upload},
         users::{update_user, user_profile},
     },
@@ -35,6 +37,8 @@ use std::{
 };
 use tower::limit::RateLimitLayer;
 use tower_http::cors::{Any, CorsLayer};
+use utoipa_axum::router::OpenApiRouter;
+use utoipa_swagger_ui::SwaggerUi;
 static JWT_SECRET: OnceLock<Vec<u8>> = OnceLock::new();
 
 pub fn jwt_secret() -> &'static [u8] {
@@ -70,8 +74,9 @@ async fn main() {
             .allow_methods([Method::GET, Method::PUT, Method::POST]);
     let _rate_limit_layer = RateLimitLayer::new(10, Duration::from_secs(1));
     println!("Listening on {}", host_address);
-    //Serve
-    let app = Router::new()
+    //the paths are most likely wrong here. gotta double check them. mixed a body extractor with
+    //route extractor.
+    let (router, openapi) = OpenApiRouter::new()
         // auth
         .route("/auth/signup", post(signup))
         .route("/auth/login", post(login))
@@ -87,7 +92,9 @@ async fn main() {
         .route("/user/repos", post(create_repo))
         .route(
             "/{username}/{repo}",
-            get(repo_home).patch(update_repo_metadata),
+            get(repo_home)
+                .patch(update_repo_metadata)
+                .delete(delete_repo),
         )
         // commits
         .route("/{username}/{repo}/commits", get(list_commits))
@@ -105,6 +112,8 @@ async fn main() {
         // git browsing
         .route("/{username}/{repo}/tree/{branch}/{*path}", get(repo_tree))
         .route("/{username}/{repo}/blob/{branch}/{*path}", get(view_file))
-        .with_state(state);
+        .with_state(state)
+        .split_for_parts();
+    let app = router.merge(SwaggerUi::new("/docs").url("/api-docs/openapi.json", openapi.clone()));
     axum::serve(listener, app).await.unwrap()
 }

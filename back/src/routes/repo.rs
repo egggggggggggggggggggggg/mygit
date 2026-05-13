@@ -19,7 +19,7 @@ use axum::{
 };
 use gix::{ObjectId, create::Kind};
 use reqwest::{StatusCode, header};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::fs;
 use std::sync::Arc;
 
@@ -104,11 +104,11 @@ pub async fn create_repo(
         }
         ApiError::Database
     })?;
-    let repo_path = state
+    let repo_path = &state
         .git_storage
         .join(user_id.to_string())
         .join(&payload.name);
-    if let Err(_e) = init_bare_repo(&repo_path) {
+    if let Err(_e) = init_bare_repo(repo_path) {
         tx.rollback().await.ok();
         return Err(ApiError::Git);
     }
@@ -118,6 +118,59 @@ pub async fn create_repo(
         "name": rec.name,
         "description": rec.description,
     })))
+}
+#[derive(Serialize, Deserialize, Debug)]
+pub struct DeletionRequest {
+    force: bool,
+    repo_name: String,
+    username: String,
+}
+#[axum::debug_handler]
+pub async fn delete_repo(
+    AuthUser(claims): AuthUser,
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<DeletionRequest>,
+) -> Result<StatusCode, ApiError> {
+    let user_id = claims.sub;
+    let can_delete = sqlx::query_scalar!(
+        r#"
+        SELECT
+            EXISTS (
+                SELECT 1
+                FROM repositories r
+                JOIN users u ON u.id = r.owner_id
+                WHERE r.name = $1
+                  AND u.username = $2
+                  AND r.owner_id = $3
+            )
+            OR
+            EXISTS (
+                SELECT 1
+                FROM repositories r
+                JOIN users u ON u.id = r.owner_id
+                JOIN repository_collaborators rc ON rc.repository_id = r.id
+                WHERE r.name = $1
+                  AND u.username = $2
+                  AND rc.user_id = $3
+                  AND rc.role = 'admin'
+            ) AS allowed;
+        "#,
+        payload.repo_name,
+        payload.username,
+        user_id
+    )
+    .fetch_one(&state.pool)
+    .await?
+    .unwrap_or(false);
+    if !can_delete {
+        return Err(ApiError::Unauthorized);
+    }
+    let path = &state
+        .git_storage
+        .join(user_id.to_string())
+        .join(payload.repo_name);
+    remove_repo(path).map_err(|_| ApiError::Internal)?;
+    Ok(StatusCode::OK)
 }
 #[axum::debug_handler]
 pub async fn update_repo_metadata(
@@ -223,4 +276,7 @@ fn init_bare_repo(path: &std::path::Path) -> Result<(), anyhow::Error> {
     fs::create_dir_all(path)?;
     gix::create::into(path, Kind::Bare, gix::create::Options::default())?;
     Ok(())
+}
+fn remove_repo(path: &std::path::Path) -> Result<(), std::io::Error> {
+    fs::remove_file(path)
 }

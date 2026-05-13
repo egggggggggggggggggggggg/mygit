@@ -1,3 +1,8 @@
+use crate::{
+    AppState,
+    errors::ApiError,
+    routes::auth::{AuthUser, MaybeAuthUser},
+};
 use axum::{
     Json,
     body::Body,
@@ -12,44 +17,70 @@ use tokio::{fs, fs::File, io::AsyncWriteExt};
 use tokio_util::io::ReaderStream;
 use uuid::Uuid;
 
-use crate::{
-    AppState,
-    errors::ApiError,
-    routes::auth::{AuthUser, MaybeAuthUser},
-};
+const MAX_SNIFF_BYTES: usize = 8192;
 
 #[axum::debug_handler]
 pub async fn upload(
     AuthUser(claims): AuthUser,
     State(state): State<Arc<AppState>>,
     mut multipart: Multipart,
-) -> Result<Json<Vec<Uuid>>, String> {
+) -> Result<Json<Vec<Uuid>>, ApiError> {
     let upload_root = state.file_storage.clone();
     let mut stored_file_ids = Vec::new();
-    while let Some(mut field) = multipart.next_field().await.map_err(|e| e.to_string())? {
-        // Read + hash into a temporary file first
+
+    while let Some(mut field) = multipart
+        .next_field()
+        .await
+        .map_err(|_| ApiError::Internal)?
+    {
         let mut size_bytes: i64 = 0;
+
         let temp_name = format!("tmp-{}", Uuid::new_v4());
-        let temp_path = upload_root.join(temp_name);
-        let mut temp_file = File::create(&temp_path).await.map_err(|e| e.to_string())?;
+        let temp_path = upload_root.join(&temp_name);
+
+        let mut temp_file = File::create(&temp_path).await?;
+
         let mut hasher = Sha256::new();
-        while let Some(chunk) = field.chunk().await.map_err(|e| e.to_string())? {
+
+        // buffer used for MIME sniffing
+        let mut sniff_buffer = Vec::with_capacity(MAX_SNIFF_BYTES);
+
+        while let Some(chunk) = field.chunk().await.map_err(|_| ApiError::Internal)? {
             size_bytes += chunk.len() as i64;
+
             hasher.update(&chunk);
+
+            // collect only first MAX_SNIFF_BYTES bytes
+            if sniff_buffer.len() < MAX_SNIFF_BYTES {
+                let remaining = MAX_SNIFF_BYTES - sniff_buffer.len();
+                sniff_buffer.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
+            }
+
             temp_file
                 .write_all(&chunk)
                 .await
-                .map_err(|e| e.to_string())?;
+                .map_err(|_| ApiError::Internal)?;
         }
-        temp_file.flush().await.map_err(|e| e.to_string())?;
+
+        temp_file.flush().await.map_err(|_| ApiError::Internal)?;
         drop(temp_file);
-        let hash = hasher.finalize();
+        // infer MIME type
+        let inferred = infer::get(&sniff_buffer).ok_or(ApiError::UnsupportedFileType)?;
+
+        let mime_type = inferred.mime_type().to_string();
+
+        // optional allowlist
+        // match mime_type.as_str() {
+        //     "image/png" | "image/jpeg" | "image/webp" | "application/pdf" => {}
+        //     _ => {
+        //         let _ = fs::remove_file(&temp_path).await;
+        //         return Err(ApiError::UnsupportedFileType);
+        //     }
+        // }
+
+        let hash_hex = hex::encode(hasher.finalize());
+
         let original_filename = field.file_name().unwrap_or("unknown").to_string();
-        let mime_type = field
-            .content_type()
-            .map(|m| m.to_string())
-            .unwrap_or_else(|| "application/octet-stream".to_string());
-        let hash_hex = hex::encode(hash);
 
         let dir1 = &hash_hex[0..2];
         let dir2 = &hash_hex[2..4];
@@ -58,15 +89,13 @@ pub async fn upload(
 
         fs::create_dir_all(&final_dir)
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(|_| ApiError::Internal)?;
+
         let final_path = final_dir.join(&hash_hex);
-        fs::rename(&temp_path, &final_path)
-            .await
-            .map_err(|e| e.to_string())?;
+
         let storage_key = format!("{}/{}/{}", dir1, dir2, hash_hex);
-        //Change this to be atomic so we don't have orphan files when the db operation fails.
-        //If insertion fails delete the file or smth.
-        let file_id = sqlx::query!(
+
+        let insert_result = sqlx::query!(
             r#"
             INSERT INTO files (
                 storage_key,
@@ -85,15 +114,35 @@ pub async fn upload(
             claims.sub,
         )
         .fetch_one(&state.pool)
-        .await
-        .map_err(|e| e.to_string())?
-        .id;
+        .await;
+
+        let file_id = match insert_result {
+            Ok(row) => row.id,
+            Err(_) => {
+                let _ = fs::remove_file(&temp_path).await;
+                return Err(ApiError::Internal);
+            }
+        };
+
+        if fs::metadata(&final_path).await.is_err() {
+            if fs::rename(&temp_path, &final_path).await.is_err() {
+                let _ = sqlx::query!(r#"DELETE FROM files WHERE id = $1"#, file_id)
+                    .execute(&state.pool)
+                    .await;
+
+                let _ = fs::remove_file(&temp_path).await;
+
+                return Err(ApiError::Internal);
+            }
+        } else {
+            fs::remove_file(&temp_path).await?;
+        }
+
         stored_file_ids.push(file_id);
     }
+
     Ok(Json(stored_file_ids))
 }
-
-//The file cannot be orphaned. if it orphaned then the db should remove it.
 pub async fn get_file(
     MaybeAuthUser(maybe_claims): MaybeAuthUser,
     State(state): State<Arc<AppState>>,
@@ -157,15 +206,9 @@ pub async fn get_file(
         header::CONTENT_DISPOSITION,
         HeaderValue::from_str(&format!("inline; filename=\"{}\"", file.original_filename)).unwrap(),
     );
-    //User has access to the resource. Start sending it over via multipart or octet stream.
-    //Will implement this later.
     Ok(response)
 }
-//Check for orhpaned files that don't have any
+//For better design make sure we implement a way of cleaning orphaned files. While we prevent it
+//explicitly from happening at creation we don't account for when a user deletes a repo meaning the
+//files still exist but don't actually have a relation anywhere.
 pub async fn clean_files() {}
-
-//General process, user uploads file and frontend stages  it or smth.
-//In the meantime the frontend attempts to send the backend the image and have it be stored. Once
-//the backend successfully stored the image we can then set the associated file wit the associated
-//comment within the comment_files join table. next time we load the comment we can just consult
-//the comment_file join table for the file.

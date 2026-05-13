@@ -14,7 +14,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use sqlx::{Type, prelude::FromRow};
-use time::{OffsetDateTime, PrimitiveDateTime};
+use time::OffsetDateTime;
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, Type)]
@@ -35,10 +35,10 @@ pub struct PullRequest {
     number: i32,
     head_branch_id: Option<Uuid>,
     base_branch_id: Option<Uuid>,
-    merged_at: Option<PrimitiveDateTime>,
-    closed_at: Option<PrimitiveDateTime>,
-    created_at: PrimitiveDateTime,
-    updated_at: PrimitiveDateTime,
+    merged_at: Option<OffsetDateTime>,
+    closed_at: Option<OffsetDateTime>,
+    created_at: OffsetDateTime,
+    updated_at: OffsetDateTime,
 }
 #[debug_handler]
 pub async fn list_pulls(
@@ -140,15 +140,20 @@ pub async fn merge_pull(
     .fetch_optional(&state.pool)
     .await?
     .ok_or(ApiError::Unauthorized)?;
-    sqlx::query_scalar!(
+    let now = OffsetDateTime::now_utc();
+    sqlx::query!(
         r#"
-        UPDATE pull_requests 
-        SET state = 'merged'
-        WHERE repository_id = $1
+        UPDATE pull_requests
+        SET state = 'merged', merged_at = $2
+        WHERE repository_id = $1 
+            AND state = 'open'
+            AND number = $3
         "#,
-        repo_id
+        repo_id,
+        now,
+        path.number
     )
-    .execute(&state.pool)
+    .fetch_optional(&state.pool)
     .await?;
     let repo_path = state.git_storage.join(&path.owner).join(&path.repo);
     let _repo = gix::open(repo_path).map_err(|_| ApiError::Internal)?;
@@ -188,19 +193,20 @@ pub async fn close_pull(
     .await?
     .ok_or(ApiError::Unauthorized)?;
     let now = OffsetDateTime::now_utc();
-    sqlx::query_scalar!(
+    sqlx::query!(
         r#"
         UPDATE pull_requests
         SET state = 'closed', closed_at = $2
         WHERE repository_id = $1 
             AND state = 'open'
+            AND number = $3
         "#,
         repo_id,
-        now.unix_timestamp(),
+        now,
+        path.number
     )
     .fetch_optional(&state.pool)
     .await?;
-
     Ok(())
 }
 pub async fn open_pull() {}

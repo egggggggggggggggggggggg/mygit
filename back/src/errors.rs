@@ -57,6 +57,9 @@ pub enum ApiError {
 
     #[error("could not find the specified file")]
     FileNotFound,
+
+    #[error("unsupported file type")]
+    UnsupportedFileType,
 }
 
 //
@@ -95,14 +98,14 @@ impl IntoResponse for ApiError {
             Self::CommitListingFailed => (StatusCode::BAD_REQUEST, "listing commits failed"),
 
             Self::FileNotFound => (StatusCode::INTERNAL_SERVER_ERROR, "file not found"),
-        };
 
+            Self::UnsupportedFileType => (StatusCode::UNSUPPORTED_MEDIA_TYPE, "file not allowed"),
+        };
         tracing::error!(
             status = %status,
             error_code = code,
             error = ?self
         );
-
         (
             status,
             Json(ErrorResponse {
