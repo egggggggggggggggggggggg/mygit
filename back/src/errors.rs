@@ -54,6 +54,9 @@ pub enum ApiError {
 
     #[error("commits listing for branch failed")]
     CommitListingFailed,
+
+    #[error("could not find the specified file")]
+    FileNotFound,
 }
 
 //
@@ -63,33 +66,35 @@ pub enum ApiError {
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let (status, code) = match &self {
-            ApiError::InvalidCredentials => (StatusCode::UNAUTHORIZED, "invalid_credentials"),
+            Self::InvalidCredentials => (StatusCode::UNAUTHORIZED, "invalid_credentials"),
 
-            ApiError::TokenExpired => (StatusCode::UNAUTHORIZED, "token_expired"),
+            Self::TokenExpired => (StatusCode::UNAUTHORIZED, "token_expired"),
 
-            ApiError::MissingAuthHeader => (StatusCode::BAD_REQUEST, "missing_auth_header"),
+            Self::MissingAuthHeader => (StatusCode::BAD_REQUEST, "missing_auth_header"),
 
-            ApiError::InvalidToken => (StatusCode::UNAUTHORIZED, "invalid_token"),
+            Self::InvalidToken => (StatusCode::UNAUTHORIZED, "invalid_token"),
 
-            ApiError::Unauthorized => (StatusCode::UNAUTHORIZED, "unauthorized"),
+            Self::Unauthorized => (StatusCode::UNAUTHORIZED, "unauthorized"),
 
-            ApiError::Forbidden => (StatusCode::FORBIDDEN, "forbidden"),
+            Self::Forbidden => (StatusCode::FORBIDDEN, "forbidden"),
 
-            ApiError::Validation(_) => (StatusCode::BAD_REQUEST, "validation_error"),
+            Self::Validation(_) => (StatusCode::BAD_REQUEST, "validation_error"),
 
-            ApiError::RepoNotFound => (StatusCode::NOT_FOUND, "repo_not_found"),
+            Self::RepoNotFound => (StatusCode::NOT_FOUND, "repo_not_found"),
 
-            ApiError::RepoAlreadyExists => (StatusCode::CONFLICT, "repo_already_exists"),
+            Self::RepoAlreadyExists => (StatusCode::CONFLICT, "repo_already_exists"),
 
-            ApiError::Filesystem => (StatusCode::INTERNAL_SERVER_ERROR, "filesystem_error"),
+            Self::Filesystem => (StatusCode::INTERNAL_SERVER_ERROR, "filesystem_error"),
 
-            ApiError::Git => (StatusCode::INTERNAL_SERVER_ERROR, "git_error"),
+            Self::Git => (StatusCode::INTERNAL_SERVER_ERROR, "git_error"),
 
-            ApiError::Database => (StatusCode::INTERNAL_SERVER_ERROR, "database_error"),
+            Self::Database => (StatusCode::INTERNAL_SERVER_ERROR, "database_error"),
 
-            ApiError::Internal => (StatusCode::INTERNAL_SERVER_ERROR, "internal_error"),
+            Self::Internal => (StatusCode::INTERNAL_SERVER_ERROR, "internal_error"),
 
-            ApiError::CommitListingFailed => (StatusCode::BAD_REQUEST, "listing commits failed"),
+            Self::CommitListingFailed => (StatusCode::BAD_REQUEST, "listing commits failed"),
+
+            Self::FileNotFound => (StatusCode::INTERNAL_SERVER_ERROR, "file not found"),
         };
 
         tracing::error!(
@@ -112,14 +117,14 @@ impl IntoResponse for ApiError {
 impl From<std::io::Error> for ApiError {
     fn from(err: std::io::Error) -> Self {
         tracing::error!("io error: {:?}", err);
-        ApiError::Filesystem
+        Self::Filesystem
     }
 }
 
 impl From<sqlx::Error> for ApiError {
     fn from(err: sqlx::Error) -> Self {
         tracing::error!("database error: {:?}", err);
-        ApiError::Database
+        Self::Database
     }
 }
 
@@ -130,8 +135,8 @@ impl From<jsonwebtoken::errors::Error> for ApiError {
         use jsonwebtoken::errors::ErrorKind;
 
         match err.kind() {
-            ErrorKind::ExpiredSignature => ApiError::TokenExpired,
-            _ => ApiError::InvalidToken,
+            ErrorKind::ExpiredSignature => Self::TokenExpired,
+            _ => Self::InvalidToken,
         }
     }
 }

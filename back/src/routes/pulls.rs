@@ -14,7 +14,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use sqlx::{Type, prelude::FromRow};
-use time::PrimitiveDateTime;
+use time::{OffsetDateTime, PrimitiveDateTime};
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, Type)]
@@ -106,6 +106,8 @@ pub struct MergeRequest {
 
 pub async fn check_merge() {}
 
+///Before doing any action involving the pr_state of a repo check if it's not open.
+///If not open then don't perform any action unless they opt to reopen it.
 #[axum::debug_handler]
 pub async fn merge_pull(
     AuthUser(claims): AuthUser,
@@ -149,10 +151,56 @@ pub async fn merge_pull(
     .execute(&state.pool)
     .await?;
     let repo_path = state.git_storage.join(&path.owner).join(&path.repo);
-    let repo = gix::open(repo_path).map_err(|_| ApiError::Internal)?;
-
+    let _repo = gix::open(repo_path).map_err(|_| ApiError::Internal)?;
     //Set the
     Ok(())
 }
-pub async fn close_pull() {}
+#[axum::debug_handler]
+pub async fn close_pull(
+    AuthUser(claims): AuthUser,
+    Path(path): Path<IssuePath>,
+    State(state): State<Arc<AppState>>,
+) -> Result<(), ApiError> {
+    let repo_id = sqlx::query_scalar!(
+        r#"
+        SELECT r.id
+        FROM repositories r
+        INNER JOIN users u
+            ON u.id = r.owner_id
+        WHERE u.username = $1
+            AND r.name = $2
+            AND (
+                r.is_private = false
+                OR r.owner_id = $3
+                OR EXISTS (
+                    SELECT 1
+                    FROM repository_collaborators rc
+                    WHERE rc.repository_id = r.id
+                    AND rc.user_id = $3
+                )
+            )
+        "#,
+        &path.owner,
+        &path.repo,
+        claims.sub,
+    )
+    .fetch_optional(&state.pool)
+    .await?
+    .ok_or(ApiError::Unauthorized)?;
+    let now = OffsetDateTime::now_utc();
+    sqlx::query_scalar!(
+        r#"
+        UPDATE pull_requests
+        SET state = 'closed', closed_at = $2
+        WHERE repository_id = $1 
+            AND state = 'open'
+        "#,
+        repo_id,
+        now.unix_timestamp(),
+    )
+    .fetch_optional(&state.pool)
+    .await?;
+
+    Ok(())
+}
 pub async fn open_pull() {}

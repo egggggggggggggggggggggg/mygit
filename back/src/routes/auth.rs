@@ -14,13 +14,12 @@ use {
         response::IntoResponse,
     },
     base64::{Engine as _, engine::general_purpose},
-    chrono::Duration,
     jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header, Validation, decode, encode},
     serde::{Deserialize, Serialize},
     sha2::{Digest, Sha256},
     sqlx::{Executor, Postgres},
     std::sync::Arc,
-    time::OffsetDateTime,
+    time::{Duration, OffsetDateTime},
     uuid::Uuid,
 };
 
@@ -60,22 +59,40 @@ pub enum AuthError {
     Jwt(#[from] jsonwebtoken::errors::Error),
 }
 
+use std::borrow::Cow;
+
 impl IntoResponse for AuthError {
     fn into_response(self) -> axum::response::Response {
-        let (status, msg) = match &self {
-            AuthError::InvalidCredentials => (StatusCode::UNAUTHORIZED, self.to_string()),
-            AuthError::TokenExpired => (StatusCode::UNAUTHORIZED, self.to_string()),
-            AuthError::MissingHeader(_) => (StatusCode::BAD_REQUEST, self.to_string()),
-            AuthError::DuplicateEmail | AuthError::DuplicateUsername => {
-                (StatusCode::CONFLICT, self.to_string())
-            }
-            AuthError::InvalidInput(_) => (StatusCode::BAD_REQUEST, self.to_string()),
-            AuthError::PasswordHashing | AuthError::PasswordVerification => {
-                (StatusCode::INTERNAL_SERVER_ERROR, self.to_string())
-            }
-            AuthError::TokenGen => (StatusCode::INTERNAL_SERVER_ERROR, self.to_string()),
-            AuthError::Database(_) => (StatusCode::INTERNAL_SERVER_ERROR, self.to_string()),
-            AuthError::Jwt(_) => (StatusCode::UNAUTHORIZED, self.to_string()),
+        let (status, msg): (StatusCode, Cow<'static, str>) = match self {
+            Self::InvalidCredentials => (
+                StatusCode::UNAUTHORIZED,
+                Cow::Borrowed("Invalid credentials"),
+            ),
+            Self::TokenExpired => (StatusCode::UNAUTHORIZED, Cow::Borrowed("Token expired")),
+            Self::MissingHeader(name) => (StatusCode::BAD_REQUEST, Cow::Borrowed(name)),
+            Self::DuplicateEmail => (StatusCode::CONFLICT, Cow::Borrowed("Email already exists")),
+            Self::DuplicateUsername => (
+                StatusCode::CONFLICT,
+                Cow::Borrowed("Username already exists"),
+            ),
+            Self::InvalidInput(details) => (StatusCode::BAD_REQUEST, Cow::Borrowed(details)),
+            Self::PasswordHashing => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Cow::Borrowed("Password hashing failed"),
+            ),
+            Self::PasswordVerification => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Cow::Borrowed("Password verification failed"),
+            ),
+            Self::TokenGen => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Cow::Borrowed("Token generation failed"),
+            ),
+            Self::Database(err) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Cow::Owned(err.to_string()),
+            ),
+            Self::Jwt(err) => (StatusCode::UNAUTHORIZED, Cow::Owned(err.to_string())),
         };
 
         (status, msg).into_response()
@@ -136,16 +153,15 @@ fn map_sqlx_error(err: sqlx::Error) -> AuthError {
 }
 
 pub fn generate_access_token(user_id: Uuid, secret: &'static [u8]) -> Result<String, AuthError> {
-    let now = chrono::Utc::now();
+    let now = time::OffsetDateTime::now_utc();
     let claims = Claims {
         sub: user_id,
-        exp: (now + Duration::minutes(10)).timestamp(),
-        iat: now.timestamp(),
+        exp: (now + Duration::minutes(10)).unix_timestamp(),
+        iat: now.unix_timestamp(),
         iss: "my-api".to_string(),
         aud: "my-app".to_string(),
         jti: Uuid::new_v4(),
     };
-
     Ok(encode(
         &Header::new(Algorithm::HS256),
         &claims,

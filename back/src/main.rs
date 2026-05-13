@@ -20,7 +20,7 @@ use back::{
     routes::{
         auth::{login, logout, refresh, signup},
         issues::{create_issue, get_issue, list_issues},
-        pulls::{list_pulls, open_pull},
+        pulls::{close_pull, list_pulls, open_pull},
         repo::{create_repo, list_commits, repo_home, repo_tree, update_repo_metadata, view_file},
         storage::{get_file, upload},
         users::{update_user, user_profile},
@@ -44,6 +44,9 @@ pub fn jwt_secret() -> &'static [u8] {
             .into_bytes()
     })
 }
+///There should be rate limiting middleware and cors middleware, but I can't figure out how to
+///properly do it. For some reason the type RateLimitLayer contains does not implement Clone when it
+///itself implements Clone? Prevents me from using it. Might be doing something wrong.
 #[tokio::main]
 async fn main() {
     dotenv().ok();
@@ -75,6 +78,8 @@ async fn main() {
         .route("/auth/refresh", post(refresh))
         .route("/auth/logout", post(logout))
         //user should first upload the files before doing anything regarding a comment.
+        //if the frontend does not recieve a response indicating the file path, then it should tell
+        //the user the file cannot be used.
         .route("/upload", post(upload))
         .route("/files/{id}", get(get_file))
         .route("/users/{username}", get(user_profile).patch(update_user))
@@ -93,7 +98,10 @@ async fn main() {
         )
         .route("/{username}/{repo}/issues/{id}", get(get_issue))
         // pulls
-        .route("/{username}/{repo}/pulls", get(list_pulls).post(open_pull))
+        .route(
+            "/{username}/{repo}/pulls",
+            get(list_pulls).post(open_pull).patch(close_pull),
+        )
         // git browsing
         .route("/{username}/{repo}/tree/{branch}/{*path}", get(repo_tree))
         .route("/{username}/{repo}/blob/{branch}/{*path}", get(view_file))

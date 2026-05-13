@@ -11,6 +11,7 @@ use crate::{
 use axum::{Json, extract::State};
 use serde::{Deserialize, Serialize};
 use sqlx::Type;
+use time::{OffsetDateTime, PrimitiveDateTime};
 use uuid::Uuid;
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, Type)]
 #[sqlx(type_name = "comment_target", rename_all = "snake_case")]
@@ -18,28 +19,14 @@ pub enum CommentTarget {
     PullRequest,
     Issue,
 }
-//Unsure of how to preceed regarding files stored in a request. Obviousl we need to store it in the
-//file_comments join table but we are unsure of whether the file system actually holds the files.
-//This causes blocking on the mainthread so maybe comments and whatnot should be done in the
-//background.
+
 #[derive(Serialize, Deserialize)]
 pub struct CommentCreationRequest {
     target_type: CommentTarget,
     target_id: Uuid,
     body: String,
-    //This might not be the right type for files.
     files: Vec<Uuid>,
 }
-///Specify the
-#[derive(Serialize, Deserialize)]
-pub struct CommentAcquireRequest {
-    pub page: Option<usize>,
-    pub per_page: Option<usize>,
-    pub repo_id: Uuid,
-    pub target_id: Uuid,
-    pub target_type: CommentTarget,
-}
-//First we run an uplod
 pub async fn create_comment(
     AuthUser(claims): AuthUser,
     State(state): State<Arc<AppState>>,
@@ -77,10 +64,118 @@ pub async fn create_comment(
     .await?;
     Ok(())
 }
-//The fronten
+
+#[derive(Serialize)]
+pub struct Comment {
+    pub id: Uuid,
+    pub author_id: Option<Uuid>,
+    pub body: String,
+    pub created_at: OffsetDateTime,
+    pub updated_at: OffsetDateTime,
+}
+
+#[derive(Deserialize)]
+pub struct CommentAcquireRequest {
+    pub repo_id: Uuid,
+    pub target_type: CommentTarget,
+    pub cursor_created_at: Option<PrimitiveDateTime>,
+    pub cursor_id: Option<Uuid>,
+    pub per_page: Option<i64>,
+}
+
+#[derive(Serialize)]
+pub struct CommentPage {
+    pub comments: Vec<Comment>,
+    pub next_cursor: Option<CommentCursor>,
+    pub has_more: bool,
+}
+
+#[derive(Serialize)]
+pub struct CommentCursor {
+    pub created_at: OffsetDateTime,
+    pub id: Uuid,
+}
+
 pub async fn get_comments(
-    MaybeAuthUser(claims): MaybeAuthUser,
+    MaybeAuthUser(maybe_claims): MaybeAuthUser,
+    State(state): State<Arc<AppState>>,
     Json(request): Json<CommentAcquireRequest>,
-) -> Result<(), ApiError> {
-    Ok(())
+) -> Result<Json<CommentPage>, ApiError> {
+    let user_id = maybe_claims.map(|c| c.sub);
+    let has_acces = sqlx::query_scalar!(
+        r#"
+        SELECT EXISTS (
+            SELECT 1 
+            FROM repositories r 
+            WHERE r.id = $1 
+                AND (
+                    r.is_private = false
+                    OR r.owner_id = $2 
+                    OR EXISTS (
+                    SELECT 1 
+                    FROM repository_collaborators rc 
+                    WHERE rc.repository_id = r.id 
+                        AND rc.user_id = $2 
+                    )
+                )
+        )
+        "#,
+        request.repo_id,
+        user_id
+    )
+    .fetch_one(&state.pool)
+    .await?
+    .unwrap_or(false);
+    if !has_acces {
+        return Err(ApiError::Unauthorized);
+    }
+    let per_page = request.per_page.unwrap_or(50).clamp(1, 100);
+    let comments = sqlx::query_as!(
+        Comment,
+        r#"
+        SELECT
+            c.id,
+            c.author_id,
+            c.body,
+            c.created_at ,
+            c.updated_at 
+        FROM comments c
+        WHERE
+            c.repository_id = $1
+            AND c.target_type = $2
+            AND (
+                $3::timestamp IS NULL
+                OR (
+                    c.created_at > $3
+                    OR (
+                        c.created_at = $3
+                        AND c.id > $4
+                    )
+                )
+            )
+        ORDER BY c.created_at ASC, c.id ASC
+        LIMIT $5
+        "#,
+        request.repo_id,
+        request.target_type as CommentTarget,
+        request.cursor_created_at,
+        request.cursor_id,
+        per_page + 1,
+    )
+    .fetch_all(&state.pool)
+    .await?;
+    let has_more = comments.len() as i64 > per_page;
+    let mut comments = comments;
+    if has_more {
+        comments.pop();
+    }
+    let next_cursor = comments.last().map(|comment| CommentCursor {
+        created_at: comment.created_at,
+        id: comment.id,
+    });
+    Ok(Json(CommentPage {
+        comments,
+        next_cursor,
+        has_more,
+    }))
 }

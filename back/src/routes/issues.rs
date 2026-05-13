@@ -54,6 +54,7 @@ pub struct IssuePath {
     pub number: i32,
 }
 ///Should first perform a repo access check so maybe this can be middleware?
+///Replace this with Cursor pagination.
 /// GET /repos/:owner/:repo/issues?page=1&per_page=20
 pub async fn list_issues(
     MaybeAuthUser(maybe_claims): MaybeAuthUser,
@@ -196,7 +197,6 @@ pub async fn create_issue(
 
     Ok((StatusCode::CREATED, Json(IssueResponse { issue })))
 }
-
 /// GET /repos/:owner/:repo/issues/:number
 pub async fn get_issue(
     MaybeAuthUser(maybe_claims): MaybeAuthUser,
@@ -249,7 +249,49 @@ pub async fn get_issue(
     .ok_or_else(|| (StatusCode::NOT_FOUND, "Issue not found".to_string()))?;
     Ok(Json(issue))
 }
-
+pub async fn change_issue_state(
+    AuthUser(claims): AuthUser,
+    Path(path): Path<IssuePath>,
+    State(state): State<Arc<AppState>>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let user_id = claims.sub;
+    let result = sqlx::query!(
+        r#"
+        UPDATE issues i
+        SET
+            state = 'closed',
+            closed_at = NOW(),
+            updated_at = NOW()
+        FROM repositories r
+        INNER JOIN users u
+            ON u.id = r.owner_id
+        WHERE i.repository_id = r.id
+            AND u.username = $1
+            AND r.name = $2
+            AND i.number = $3
+            AND (
+                r.owner_id = $4
+                OR EXISTS (
+                    SELECT 1
+                    FROM repository_collaborators rc
+                    WHERE rc.repository_id = r.id
+                        AND rc.user_id = $4
+                )
+            )
+        "#,
+        path.owner,
+        path.repo,
+        path.number,
+        user_id,
+    )
+    .execute(&state.pool)
+    .await
+    .map_err(internal_error)?;
+    if result.rows_affected() == 0 {
+        return Err((StatusCode::NOT_FOUND, "Issue not found".to_string()));
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
 fn internal_error<E>(err: E) -> (StatusCode, String)
 where
     E: std::fmt::Display,

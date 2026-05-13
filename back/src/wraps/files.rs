@@ -18,7 +18,7 @@ use anyhow::{Context as _, bail};
 use gix::{
     ObjectId, Repository,
     bstr::{BStr, ByteSlice},
-    objs::{FindExt, tree::EntryKind},
+    objs::tree::EntryKind,
 };
 use serde::Serialize;
 
@@ -121,7 +121,7 @@ pub fn file_exists_at_commit(
 #[serde(tag = "type")]
 pub enum Node {
     File { name: String, oid: String },
-    Directory { name: String, children: Vec<Node> },
+    Directory { name: String, children: Vec<Self> },
     Submodule { name: String, oid: String },
 }
 pub fn get_tree(repo: &Repository, commit_id: ObjectId, name: &str) -> Result<Node, GixError> {

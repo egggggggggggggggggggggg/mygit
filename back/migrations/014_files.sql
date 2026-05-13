@@ -1,6 +1,5 @@
 CREATE TABLE files (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-
     uploader_id UUID REFERENCES users(id) ON DELETE SET NULL,
 
     storage_key TEXT NOT NULL UNIQUE,

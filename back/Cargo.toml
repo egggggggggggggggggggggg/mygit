@@ -8,7 +8,6 @@ anyhow = "1.0.102"
 argon2 = "0.5.3"
 axum = {version = "0.8.9", features = ["macros", "multipart",]}
 base64 = "0.22.1"
-chrono = {version = "0.4.44", features = ["serde"]}
 dotenvy = "0.15.7"
 futures = "0.3.32"
 gix = {version = "0.83.0", features = ["serde"]}

@@ -2,11 +2,11 @@ use axum::{
     Json,
     body::Body,
     extract::{Multipart, Query, State},
-    http::Response,
+    http::{HeaderValue, Response},
+    response::IntoResponse,
 };
-use serde::{Deserialize, Serialize};
+use reqwest::header;
 use sha2::{Digest, Sha256};
-use sqlx::prelude::FromRow;
 use std::sync::Arc;
 use tokio::{fs, fs::File, io::AsyncWriteExt};
 use tokio_util::io::ReaderStream;
@@ -15,10 +15,7 @@ use uuid::Uuid;
 use crate::{
     AppState,
     errors::ApiError,
-    routes::{
-        auth::{AuthUser, MaybeAuthUser},
-        comments::CommentTarget,
-    },
+    routes::auth::{AuthUser, MaybeAuthUser},
 };
 
 #[axum::debug_handler]
@@ -26,9 +23,9 @@ pub async fn upload(
     AuthUser(claims): AuthUser,
     State(state): State<Arc<AppState>>,
     mut multipart: Multipart,
-) -> Result<Json<Vec<String>>, String> {
+) -> Result<Json<Vec<Uuid>>, String> {
     let upload_root = state.file_storage.clone();
-    let mut stored_paths = Vec::new();
+    let mut stored_file_ids = Vec::new();
     while let Some(mut field) = multipart.next_field().await.map_err(|e| e.to_string())? {
         // Read + hash into a temporary file first
         let mut size_bytes: i64 = 0;
@@ -36,7 +33,6 @@ pub async fn upload(
         let temp_path = upload_root.join(temp_name);
         let mut temp_file = File::create(&temp_path).await.map_err(|e| e.to_string())?;
         let mut hasher = Sha256::new();
-
         while let Some(chunk) = field.chunk().await.map_err(|e| e.to_string())? {
             size_bytes += chunk.len() as i64;
             hasher.update(&chunk);
@@ -70,15 +66,17 @@ pub async fn upload(
         let storage_key = format!("{}/{}/{}", dir1, dir2, hash_hex);
         //Change this to be atomic so we don't have orphan files when the db operation fails.
         //If insertion fails delete the file or smth.
-        sqlx::query!(
+        let file_id = sqlx::query!(
             r#"
             INSERT INTO files (
                 storage_key,
                 original_filename,
                 mime_type,
-                size_bytes, uploader_id
+                size_bytes,
+                uploader_id
             )
             VALUES ($1, $2, $3, $4, $5)
+            RETURNING id
             "#,
             storage_key,
             original_filename,
@@ -86,26 +84,22 @@ pub async fn upload(
             size_bytes,
             claims.sub,
         )
-        .execute(&state.pool)
+        .fetch_one(&state.pool)
         .await
-        .map_err(|e| e.to_string())?;
-        stored_paths.push(storage_key);
+        .map_err(|e| e.to_string())?
+        .id;
+        stored_file_ids.push(file_id);
     }
-    Ok(Json(stored_paths))
+    Ok(Json(stored_file_ids))
 }
-#[derive(Deserialize, Serialize, FromRow)]
-struct CommentInfo {
-    target_type: CommentTarget,
-    target_id: Uuid,
-}
+
 //The file cannot be orphaned. if it orphaned then the db should remove it.
 pub async fn get_file(
     MaybeAuthUser(maybe_claims): MaybeAuthUser,
     State(state): State<Arc<AppState>>,
     Query(id): Query<Uuid>,
-) -> Result<(), ApiError> {
+) -> Result<impl IntoResponse, ApiError> {
     let user_id = maybe_claims.map(|c| c.sub);
-    ///Should return
     let can_access = sqlx::query_scalar!(
         r#"
         SELECT EXISTS ( 
@@ -150,33 +144,24 @@ pub async fn get_file(
     .await?
     .ok_or(ApiError::RepoNotFound)?;
     let path = state.file_storage.join(&file.storage_key);
-    let disk_file = File;
+    let disk_file = File::open(path).await?;
     let stream = ReaderStream::new(disk_file);
-
     let body = Body::from_stream(stream);
-
     let mut response = Response::new(body);
-
     response.headers_mut().insert(
         header::CONTENT_TYPE,
         HeaderValue::from_str(&file.mime_type)
             .unwrap_or(HeaderValue::from_static("application/octet-stream")),
     );
-
     response.headers_mut().insert(
         header::CONTENT_DISPOSITION,
         HeaderValue::from_str(&format!("inline; filename=\"{}\"", file.original_filename)).unwrap(),
     );
     //User has access to the resource. Start sending it over via multipart or octet stream.
     //Will implement this later.
-    let body = Body::from("test");
-    Response::builder()
-        .header("Content-Type", "application/octet-stream")
-        .body(body)
-        .unwrap();
-    Ok(())
+    Ok(response)
 }
-//Check for orhpaned files that don't
+//Check for orhpaned files that don't have any
 pub async fn clean_files() {}
 
 //General process, user uploads file and frontend stages  it or smth.

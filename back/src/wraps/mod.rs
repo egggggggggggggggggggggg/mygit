@@ -13,7 +13,7 @@ use thiserror::Error;
 ///Gix genuinely has the worst error handling of any library crate. wtf is this.
 pub enum GixError {
     #[error("failed to open repository")]
-    OpenRepo(#[from] gix::open::Error),
+    OpenRepo,
 
     #[error("failed to read HEAD")]
     ReadHead(#[from] gix::reference::find::existing::Error),
