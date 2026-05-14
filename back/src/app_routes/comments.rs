@@ -5,15 +5,16 @@ use std::sync::Arc;
 ///mem cache if we ever utilize the cachelayer
 use crate::{
     AppState,
+    app_routes::auth::{AuthUser, MaybeAuthUser},
     errors::ApiError,
-    routes::auth::{AuthUser, MaybeAuthUser},
 };
 use axum::{Json, extract::State};
 use serde::{Deserialize, Serialize};
 use sqlx::Type;
 use time::{OffsetDateTime, PrimitiveDateTime};
+use utoipa::ToSchema;
 use uuid::Uuid;
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, Type)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Type, ToSchema)]
 #[sqlx(type_name = "comment_target", rename_all = "snake_case")]
 pub enum CommentTarget {
     PullRequest,
@@ -74,7 +75,7 @@ pub struct Comment {
     pub updated_at: OffsetDateTime,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 pub struct CommentAcquireRequest {
     pub repo_id: Uuid,
     pub target_type: CommentTarget,
@@ -95,7 +96,7 @@ pub struct CommentCursor {
     pub created_at: OffsetDateTime,
     pub id: Uuid,
 }
-
+#[utoipa::path(get, path = "/{username}/{repo}/pulls/{id}/comments", tag = "comments", security(("bearerAuth" =[])), )]
 pub async fn get_comments(
     MaybeAuthUser(maybe_claims): MaybeAuthUser,
     State(state): State<Arc<AppState>>,

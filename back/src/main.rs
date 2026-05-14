@@ -10,13 +10,21 @@
 //A lot of these functions have multiple queries. If imma continue working on this I'll probably
 //try and optimize some of them into a single one. For the tables I threw uuid everywhere when
 //BIGSERIAL/SERIAL could've been fine.
-use axum::{
-    http::Method,
-    routing::{get, post},
+use axum::http::Method;
+pub use back::app_routes::{
+    auth::{__path_login, __path_logout, __path_refresh, __path_signup},
+    issues::{__path_create_issue, __path_get_issue, __path_list_issues},
+    pulls::{__path_close_pull, __path_list_pulls, __path_open_pull},
+    repo::{
+        __path_create_repo, __path_delete_repo, __path_list_commits, __path_repo_home,
+        __path_repo_tree, __path_update_repo_metadata, __path_view_file,
+    },
+    storage::{__path_get_file, __path_upload},
+    users::{__path_update_user, __path_user_profile},
 };
 use back::{
-    AppState, CacheLayer,
-    routes::{
+    AppState,
+    app_routes::{
         auth::{login, logout, refresh, signup},
         issues::{create_issue, get_issue, list_issues},
         pulls::{close_pull, list_pulls, open_pull},
@@ -28,6 +36,7 @@ use back::{
         users::{update_user, user_profile},
     },
 };
+
 use dotenvy::dotenv;
 use sqlx::PgPool;
 use std::{
@@ -37,7 +46,8 @@ use std::{
 };
 use tower::limit::RateLimitLayer;
 use tower_http::cors::{Any, CorsLayer};
-use utoipa_axum::router::OpenApiRouter;
+use utoipa::openapi::security::{Http, HttpAuthScheme, SecurityScheme};
+use utoipa_axum::{router::OpenApiRouter, routes};
 use utoipa_swagger_ui::SwaggerUi;
 static JWT_SECRET: OnceLock<Vec<u8>> = OnceLock::new();
 
@@ -57,12 +67,11 @@ async fn main() {
     let host_address = std::env::var("SERVE_ADDRESS").unwrap();
     let git_storage = PathBuf::from(std::env::var("GIT_REPO_PATH").unwrap());
     let db_url = std::env::var("DATABASE_URL").unwrap();
+    let file_storage = PathBuf::from(std::env::var("FILE_STORAGE").unwrap());
     let state = Arc::new(AppState {
         pool: PgPool::connect(&db_url).await.unwrap(),
         git_storage,
-        //Placeholder
-        file_storage: PathBuf::new(),
-        cache: CacheLayer::default(),
+        file_storage,
         jwt_secret: jwt_secret(),
     });
     let listener = tokio::net::TcpListener::bind(host_address.clone())
@@ -76,44 +85,48 @@ async fn main() {
     println!("Listening on {}", host_address);
     //the paths are most likely wrong here. gotta double check them. mixed a body extractor with
     //route extractor.
-    let (router, openapi) = OpenApiRouter::new()
-        // auth
-        .route("/auth/signup", post(signup))
-        .route("/auth/login", post(login))
-        .route("/auth/refresh", post(refresh))
-        .route("/auth/logout", post(logout))
-        //user should first upload the files before doing anything regarding a comment.
-        //if the frontend does not recieve a response indicating the file path, then it should tell
-        //the user the file cannot be used.
-        .route("/upload", post(upload))
-        .route("/files/{id}", get(get_file))
-        .route("/users/{username}", get(user_profile).patch(update_user))
-        // repositories
-        .route("/user/repos", post(create_repo))
-        .route(
-            "/{username}/{repo}",
-            get(repo_home)
-                .patch(update_repo_metadata)
-                .delete(delete_repo),
-        )
-        // commits
-        .route("/{username}/{repo}/commits", get(list_commits))
-        // issues
-        .route(
-            "/{username}/{repo}/issues",
-            get(list_issues).post(create_issue),
-        )
-        .route("/{username}/{repo}/issues/{id}", get(get_issue))
-        // pulls
-        .route(
-            "/{username}/{repo}/pulls",
-            get(list_pulls).post(open_pull).patch(close_pull),
-        )
-        // git browsing
-        .route("/{username}/{repo}/tree/{branch}/{*path}", get(repo_tree))
-        .route("/{username}/{repo}/blob/{branch}/{*path}", get(view_file))
+    let (router, mut openapi) = OpenApiRouter::new()
+        .routes(routes!(signup))
+        .routes(routes!(login))
+        .routes(routes!(refresh))
+        .routes(routes!(logout))
+        .routes(routes!(upload))
+        .routes(routes!(get_file))
+        .routes(routes!(create_repo))
+        .routes(routes!(delete_repo))
+        .routes(routes!(list_commits))
+        .routes(routes!(repo_home))
+        .routes(routes!(repo_tree))
+        .routes(routes!(update_repo_metadata))
+        .routes(routes!(view_file))
+        .routes(routes!(update_user))
+        .routes(routes!(user_profile))
+        .routes(routes!(list_issues))
+        .routes(routes!(create_issue))
+        .routes(routes!(get_issue))
+        .routes(routes!(list_pulls))
+        .routes(routes!(open_pull))
+        .routes(routes!(close_pull))
         .with_state(state)
         .split_for_parts();
+    openapi.components.as_mut().unwrap().add_security_scheme(
+        "bearerAuth",
+        SecurityScheme::Http(Http::new(HttpAuthScheme::Bearer)),
+    );
+    openapi.info.title = String::from("MyGit Backend");
+    openapi.info.description = Some(String::from("Self hosted git service"));
+    openapi.info.contact = None;
+    openapi.info.version = String::from("");
+    openapi.info.license = None;
     let app = router.merge(SwaggerUi::new("/docs").url("/api-docs/openapi.json", openapi.clone()));
     axum::serve(listener, app).await.unwrap()
+}
+#[cfg(test)]
+mod tests {
+    //Thingie to run the tests. Normally you'd just write independe tests but majority require auth
+    //to test.
+    #[test]
+    pub fn drive_tests() {}
+    #[test]
+    pub fn test_signup() {}
 }

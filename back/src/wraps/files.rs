@@ -21,6 +21,7 @@ use gix::{
     objs::tree::EntryKind,
 };
 use serde::Serialize;
+use utoipa::ToSchema;
 
 use crate::wraps::GixError;
 
@@ -117,12 +118,22 @@ pub fn file_exists_at_commit(
     Ok(entry
         .is_some_and(|e| matches!(e.mode().kind(), EntryKind::Blob | EntryKind::BlobExecutable)))
 }
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 #[serde(tag = "type")]
 pub enum Node {
-    File { name: String, oid: String },
-    Directory { name: String, children: Vec<Self> },
-    Submodule { name: String, oid: String },
+    File {
+        name: String,
+        oid: String,
+    },
+    #[schema(no_recursion)]
+    Directory {
+        name: String,
+        children: Vec<Self>,
+    },
+    Submodule {
+        name: String,
+        oid: String,
+    },
 }
 pub fn get_tree(repo: &Repository, commit_id: ObjectId, name: &str) -> Result<Node, GixError> {
     let commit = repo.find_commit(commit_id)?;

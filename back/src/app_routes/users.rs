@@ -5,13 +5,14 @@ use axum::{
     extract::{Path, State},
 };
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 
 use crate::{
     AppState,
-    routes::auth::{AuthUser, MaybeAuthUser},
+    app_routes::auth::{AuthUser, MaybeAuthUser},
 };
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct UserProfileResponse {
     pub username: String,
     pub display_name: Option<String>,
@@ -21,8 +22,21 @@ pub struct UserProfileResponse {
     pub is_self: bool,
     pub is_following: bool,
 }
-
-#[axum::debug_handler]
+#[utoipa::path(
+    get,
+    path = "/users/{username}",
+    tag = "users",
+    params(
+        ("username" = String, Path, description = "Username to fetch")
+    ),
+    responses(
+        (status = 200, description = "User profile", body = UserProfileResponse),
+        (status = 404, description = "User not found"),
+        (status = 500, description = "Internal server error")
+    ),
+    // optional auth
+    security(("bearerAuth" = []))
+)]
 pub async fn user_profile(
     MaybeAuthUser(claims): MaybeAuthUser,
     State(state): State<Arc<AppState>>,
@@ -64,19 +78,33 @@ pub async fn user_profile(
     }))
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct UpdateRequest {
     pub display_name: Option<String>,
     pub bio: Option<String>,
     pub avatar_url: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct UpdateUserResponse {
     pub success: bool,
 }
-
-#[axum::debug_handler]
+#[utoipa::path(
+    patch,
+    path = "/users/{username}",
+    tag = "users",
+    security(("bearerAuth" = [])),
+    params(
+        ("username" = String, Path, description = "Username to update")
+    ),
+    request_body(content = UpdateRequest),
+    responses(
+        (status = 200, description = "User updated", body = UpdateUserResponse),
+        (status = 400, description = "Invalid input"),
+        (status = 401, description = "Unauthorized"),
+        (status = 500, description = "Internal server error")
+    )
+)]
 pub async fn update_user(
     AuthUser(claims): AuthUser,
     State(state): State<Arc<AppState>>,
@@ -88,13 +116,11 @@ pub async fn update_user(
     {
         return Err("display name too long");
     }
-
     if let Some(avatar_url) = &payload.avatar_url
         && avatar_url.len() > 500
     {
         return Err("avatar url too long");
     }
-
     sqlx::query!(
         r#"
         UPDATE users

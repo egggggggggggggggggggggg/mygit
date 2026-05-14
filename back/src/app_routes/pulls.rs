@@ -2,29 +2,30 @@ use std::sync::Arc;
 
 use crate::{
     AppState,
-    errors::ApiError,
-    routes::{
+    app_routes::{
         auth::{AuthUser, MaybeAuthUser},
         issues::IssuePath,
     },
+    errors::ApiError,
 };
 use axum::{
-    Json, debug_handler,
+    Json,
     extract::{Path, State},
 };
 use serde::{Deserialize, Serialize};
 use sqlx::{Type, prelude::FromRow};
 use time::OffsetDateTime;
+use utoipa::ToSchema;
 use uuid::Uuid;
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, Type)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Type, ToSchema)]
 #[sqlx(type_name = "pr_state", rename_all = "lowercase")]
 pub enum PrState {
     Open,
     Closed,
     Merged,
 }
-#[derive(Deserialize, Serialize, FromRow)]
+#[derive(Deserialize, Serialize, FromRow, ToSchema)]
 pub struct PullRequest {
     id: Uuid,
     repository_id: Uuid,
@@ -40,7 +41,22 @@ pub struct PullRequest {
     created_at: OffsetDateTime,
     updated_at: OffsetDateTime,
 }
-#[debug_handler]
+#[utoipa::path(
+    get,
+    path = "/{username}/{repo}/pulls",
+    tag = "pulls",
+    params(
+        ("username" = String, Path, description = "Repository owner username"),
+        ("repo" = String, Path, description = "Repository name")
+    ),
+    security(("bearerAuth" = [])),
+    responses(
+        (status = 200, description = "List pull requests", body = [PullRequest]),
+        (status = 401, description = "Unauthorized"),
+        (status = 404, description = "Repository not found"),
+        (status = 500, description = "Internal server error")
+    )
+)]
 pub async fn list_pulls(
     MaybeAuthUser(maybe_claims): MaybeAuthUser,
     Path(path): Path<IssuePath>,
@@ -99,7 +115,7 @@ pub async fn list_pulls(
     .await?;
     Ok(Json(pull_requests))
 }
-#[derive(Deserialize, Serialize, Debug)]
+#[derive(Deserialize, Serialize, Debug, ToSchema)]
 pub struct MergeRequest {
     force: bool,
 }
@@ -160,7 +176,25 @@ pub async fn merge_pull(
     //Set the
     Ok(())
 }
-#[axum::debug_handler]
+
+#[utoipa::path(
+    patch,
+    path = "/{username}/{repo}/pulls",
+    tag = "pulls",
+    params(
+        ("username" = String, Path, description = "Repository owner username"),
+        ("repo" = String, Path, description = "Repository name"),
+        ("number" = i32, Query, description = "Pull request number (if using query), or use path param variant if your route includes it")
+    ),
+    request_body(content = MergeRequest, description = "Close or merge options"),
+    security(("bearerAuth" = [])),
+    responses(
+        (status = 204, description = "Pull request updated (closed/merged)"),
+        (status = 401, description = "Unauthorized"),
+        (status = 404, description = "Pull request not found"),
+        (status = 500, description = "Internal server error")
+    )
+)]
 pub async fn close_pull(
     AuthUser(claims): AuthUser,
     Path(path): Path<IssuePath>,
@@ -209,4 +243,23 @@ pub async fn close_pull(
     .await?;
     Ok(())
 }
+
+#[utoipa::path(
+    post,
+    path = "/{username}/{repo}/pulls",
+    tag = "pulls",
+    params(
+        ("username" = String, Path, description = "Repository owner username"),
+        ("repo" = String, Path, description = "Repository name")
+    ),
+    // adjust request_body type when open_pull is implemented
+    request_body(content = Option<serde_json::Value>, description = "Open pull request payload (TBD)"),
+    security(("bearerAuth" = [])),
+    responses(
+        (status = 201, description = "Pull request opened"),
+        (status = 401, description = "Unauthorized"),
+        (status = 404, description = "Repository not found"),
+        (status = 500, description = "Internal server error")
+    )
+)]
 pub async fn open_pull() {}

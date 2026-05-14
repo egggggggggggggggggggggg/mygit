@@ -8,20 +8,21 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
 use time::PrimitiveDateTime;
+use utoipa::ToSchema;
 use uuid::Uuid;
 
 use crate::{
     AppState, Pagination,
-    routes::auth::{AuthUser, MaybeAuthUser},
+    app_routes::auth::{AuthUser, MaybeAuthUser},
 };
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 pub struct IssueCreation {
     pub title: String,
     pub body: Option<String>,
 }
 
-#[derive(Serialize, FromRow)]
+#[derive(Serialize, FromRow, ToSchema)]
 pub struct Issue {
     pub id: Uuid,
     pub repository_id: Uuid,
@@ -36,7 +37,7 @@ pub struct Issue {
     pub updated_at: PrimitiveDateTime,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct IssueResponse {
     pub issue: Issue,
 }
@@ -53,9 +54,26 @@ pub struct IssuePath {
     pub repo: String,
     pub number: i32,
 }
-///Should first perform a repo access check so maybe this can be middleware?
-///Replace this with Cursor pagination.
-/// GET /repos/:owner/:repo/issues?page=1&per_page=20
+
+#[utoipa::path(
+    get,
+    path = "/{username}/{repo}/issues",
+    tag = "issues",
+    params(
+        ("username" = String, Path, description = "Repository owner username"),
+        ("repo" = String, Path, description = "Repository name"),
+        ("page" = Option<i32>, Query, description = "Page number (default 1)"),
+        ("per_page" = Option<i32>, Query, description = "Items per page (default 20, max 100)")
+    ),
+    // optional auth (public or authenticated)
+    security(("bearerAuth" = [])),
+    responses(
+        (status = 200, description = "List issues", body = [Issue]),
+        (status = 401, description = "Unauthorized"),
+        (status = 404, description = "Repository not found"),
+        (status = 500, description = "Internal server error")
+    )
+)]
 pub async fn list_issues(
     MaybeAuthUser(maybe_claims): MaybeAuthUser,
     Path(path): Path<RepoPath>,
@@ -117,8 +135,23 @@ pub async fn list_issues(
     Ok(Json(issues))
 }
 
-/// POST /repos/:owner/:repo/issues
-#[axum::debug_handler]
+#[utoipa::path(
+    post,
+    path = "/{username}/{repo}/issues",
+    tag = "issues",
+    params(
+        ("username" = String, Path, description = "Repository owner username"),
+        ("repo" = String, Path, description = "Repository name")
+    ),
+    request_body(content = IssueCreation, description = "Issue creation payload"),
+    security(("bearerAuth" = [])),
+    responses(
+        (status = 201, description = "Issue created", body = IssueResponse),
+        (status = 401, description = "Unauthorized"),
+        (status = 404, description = "Repository not found"),
+        (status = 500, description = "Internal server error")
+    )
+)]
 pub async fn create_issue(
     AuthUser(claims): AuthUser,
     Path(path): Path<RepoPath>,
@@ -195,7 +228,23 @@ pub async fn create_issue(
 
     Ok((StatusCode::CREATED, Json(IssueResponse { issue })))
 }
-/// GET /repos/:owner/:repo/issues/:number
+#[utoipa::path(
+    get,
+    path = "/{username}/{repo}/issues/{id}",
+    tag = "issues",
+    params(
+        ("username" = String, Path, description = "Repository owner username"),
+        ("repo" = String, Path, description = "Repository name"),
+        ("id" = i32, Path, description = "Issue number")
+    ),
+    security(("bearerAuth" = [])),
+    responses(
+        (status = 200, description = "Issue details", body = Issue),
+        (status = 401, description = "Unauthorized"),
+        (status = 404, description = "Issue not found"),
+        (status = 500, description = "Internal server error")
+    )
+)]
 pub async fn get_issue(
     MaybeAuthUser(maybe_claims): MaybeAuthUser,
     Path(path): Path<IssuePath>,

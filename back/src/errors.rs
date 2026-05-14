@@ -143,3 +143,78 @@ impl From<jsonwebtoken::errors::Error> for ApiError {
         }
     }
 }
+#[derive(thiserror::Error, Debug)]
+pub enum AuthError {
+    #[error("invalid credentials")]
+    InvalidCredentials,
+
+    #[error("token expired")]
+    TokenExpired,
+
+    #[error("missing header: {0}")]
+    MissingHeader(&'static str),
+
+    #[error("duplicate email")]
+    DuplicateEmail,
+
+    #[error("duplicate username")]
+    DuplicateUsername,
+
+    #[error("invalid input: {0}")]
+    InvalidInput(&'static str),
+
+    #[error("password hashing failed")]
+    PasswordHashing,
+
+    #[error("password verification failed")]
+    PasswordVerification,
+
+    #[error("token generation failed")]
+    TokenGen,
+
+    #[error("database error: {0}")]
+    Database(#[from] sqlx::Error),
+
+    #[error("jwt error: {0}")]
+    Jwt(#[from] jsonwebtoken::errors::Error),
+}
+
+use std::borrow::Cow;
+
+impl IntoResponse for AuthError {
+    fn into_response(self) -> axum::response::Response {
+        let (status, msg): (StatusCode, Cow<'static, str>) = match self {
+            Self::InvalidCredentials => (
+                StatusCode::UNAUTHORIZED,
+                Cow::Borrowed("Invalid credentials"),
+            ),
+            Self::TokenExpired => (StatusCode::UNAUTHORIZED, Cow::Borrowed("Token expired")),
+            Self::MissingHeader(name) => (StatusCode::BAD_REQUEST, Cow::Borrowed(name)),
+            Self::DuplicateEmail => (StatusCode::CONFLICT, Cow::Borrowed("Email already exists")),
+            Self::DuplicateUsername => (
+                StatusCode::CONFLICT,
+                Cow::Borrowed("Username already exists"),
+            ),
+            Self::InvalidInput(details) => (StatusCode::BAD_REQUEST, Cow::Borrowed(details)),
+            Self::PasswordHashing => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Cow::Borrowed("Password hashing failed"),
+            ),
+            Self::PasswordVerification => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Cow::Borrowed("Password verification failed"),
+            ),
+            Self::TokenGen => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Cow::Borrowed("Token generation failed"),
+            ),
+            Self::Database(err) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Cow::Owned(err.to_string()),
+            ),
+            Self::Jwt(err) => (StatusCode::UNAUTHORIZED, Cow::Owned(err.to_string())),
+        };
+
+        (status, msg).into_response()
+    }
+}

@@ -1,7 +1,7 @@
 use crate::{
     AppState,
+    app_routes::auth::{AuthUser, MaybeAuthUser},
     errors::ApiError,
-    routes::auth::{AuthUser, MaybeAuthUser},
 };
 use axum::{
     Json,
@@ -11,15 +11,41 @@ use axum::{
     response::IntoResponse,
 };
 use reqwest::header;
+use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use tokio::{fs, fs::File, io::AsyncWriteExt};
 use tokio_util::io::ReaderStream;
+use utoipa::ToSchema;
 use uuid::Uuid;
 
-const MAX_SNIFF_BYTES: usize = 8192;
+#[allow(unused)]
+#[derive(Deserialize, ToSchema)]
+struct PlaceHolderForm {
+    name: String,
+    #[schema(format = Binary, content_media_type = "application/octet_stream")]
+    file: String,
+}
 
-#[axum::debug_handler]
+const MAX_SNIFF_BYTES: usize = 8192;
+#[utoipa::path(
+    post,
+    path = "/upload",
+    tag = "files",
+    security(("bearerAuth" = [])),
+    request_body(
+        content = PlaceHolderForm,
+        content_type = "multipart/form-data", 
+        // describe that one or more files are expected; no concrete schema for each part
+        description = "One or more file parts (multipart/form-data)"
+    ),
+    responses(
+        (status = 200, description = "Uploaded file IDs", body = Vec<uuid::Uuid>),
+        (status = 401, description = "Unauthorized"),
+        (status = 415, description = "Unsupported file type"),
+        (status = 500, description = "Internal server error")
+    )
+)]
 pub async fn upload(
     AuthUser(claims): AuthUser,
     State(state): State<Arc<AppState>>,
@@ -143,6 +169,22 @@ pub async fn upload(
 
     Ok(Json(stored_file_ids))
 }
+#[utoipa::path(
+    get,
+    path = "/files/{id}",
+    tag = "files",
+    params(
+        ("id" = uuid::Uuid, Path, description = "File id to retrieve")
+    ),
+    // optional auth: documented as supported but not required
+    security(("bearerAuth" = [])),
+    responses(
+        (status = 200, description = "File stream", content_type = "application/octet-stream"),
+        (status = 401, description = "Unauthorized"),
+        (status = 404, description = "File not found"),
+        (status = 500, description = "Internal server error")
+    )
+)]
 pub async fn get_file(
     MaybeAuthUser(maybe_claims): MaybeAuthUser,
     State(state): State<Arc<AppState>>,

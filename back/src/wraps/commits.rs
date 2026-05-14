@@ -17,25 +17,26 @@
 use anyhow::Context as _;
 use gix::{ObjectId, Repository};
 use serde::Serialize;
+use time::OffsetDateTime;
+use utoipa::ToSchema;
 
 /// Full metadata extracted from a single commit.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct CommitInfo {
     /// Full 40-hex SHA-1 / SHA-256 object ID.
-    pub hash: ObjectId,
+    pub hash: String,
 
     /// Author display name (UTF-8, lossy).
     pub author_name: String,
     /// Author e-mail address.
     pub author_email: String,
     /// When the change was originally authored.
-    pub authored_at: gix::date::Time,
+    pub authored_at: OffsetDateTime,
 
     /// Committer display name (differs from author on rebases / merges).
     pub committer_name: String,
     /// When the commit object was written (used for branch ordering).
-    pub committed_at: gix::date::Time,
-
+    pub committed_at: OffsetDateTime,
     /// First line of the commit message (the "subject").
     pub summary: String,
     /// Remainder of the commit message after the blank line, if any.
@@ -46,7 +47,6 @@ impl<'repo> TryFrom<gix::Commit<'repo>> for CommitInfo {
     type Error = anyhow::Error;
 
     fn try_from(commit: gix::Commit<'repo>) -> Result<Self, Self::Error> {
-        // A single `decode()` pass is shared by all field accessors below.
         let author = commit.author().context("commit has no author signature")?;
         let committer = commit
             .committer()
@@ -55,15 +55,30 @@ impl<'repo> TryFrom<gix::Commit<'repo>> for CommitInfo {
             .message()
             .context("commit message is not valid UTF-8")?;
 
+        // convert gix::ObjectId -> hex string
+        let hash = commit.id().to_hex().to_string();
+        // convert gix::date::Time -> OffsetDateTime
+        let authored_at = {
+            let t = author.time()?;
+            // gix::date::Time exposes `seconds`+`offset` or similar; use RFC3339 conversion
+            OffsetDateTime::from_unix_timestamp(t.seconds)
+                .map_err(|e| anyhow::anyhow!(e))?
+                .to_offset(time::UtcOffset::from_whole_seconds(t.offset)?)
+        };
+        let committed_at = {
+            let t = committer.time()?;
+            OffsetDateTime::from_unix_timestamp(t.seconds)
+                .map_err(|e| anyhow::anyhow!(e))?
+                .to_offset(time::UtcOffset::from_whole_seconds(t.offset)?)
+        };
         Ok(Self {
-            hash: commit.id().detach(),
+            hash,
             author_name: author.name.to_string(),
             author_email: author.email.to_string(),
-            authored_at: author.time()?,
+            authored_at,
             committer_name: committer.name.to_string(),
-            committed_at: committer.time()?,
+            committed_at,
             summary: message.title.to_string(),
-            // `body()` is `None` when there is no blank-line separator.
             body: message.body.map(|b| b.to_string()),
         })
     }

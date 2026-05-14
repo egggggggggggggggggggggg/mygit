@@ -1,5 +1,5 @@
 use {
-    crate::AppState,
+    crate::{AppState, errors::AuthError},
     argon2::{
         Argon2, PasswordHasher, PasswordVerifier,
         password_hash::{
@@ -24,82 +24,6 @@ use {
     uuid::Uuid,
 };
 
-#[derive(thiserror::Error, Debug)]
-pub enum AuthError {
-    #[error("invalid credentials")]
-    InvalidCredentials,
-
-    #[error("token expired")]
-    TokenExpired,
-
-    #[error("missing header: {0}")]
-    MissingHeader(&'static str),
-
-    #[error("duplicate email")]
-    DuplicateEmail,
-
-    #[error("duplicate username")]
-    DuplicateUsername,
-
-    #[error("invalid input: {0}")]
-    InvalidInput(&'static str),
-
-    #[error("password hashing failed")]
-    PasswordHashing,
-
-    #[error("password verification failed")]
-    PasswordVerification,
-
-    #[error("token generation failed")]
-    TokenGen,
-
-    #[error("database error: {0}")]
-    Database(#[from] sqlx::Error),
-
-    #[error("jwt error: {0}")]
-    Jwt(#[from] jsonwebtoken::errors::Error),
-}
-
-use std::borrow::Cow;
-
-impl IntoResponse for AuthError {
-    fn into_response(self) -> axum::response::Response {
-        let (status, msg): (StatusCode, Cow<'static, str>) = match self {
-            Self::InvalidCredentials => (
-                StatusCode::UNAUTHORIZED,
-                Cow::Borrowed("Invalid credentials"),
-            ),
-            Self::TokenExpired => (StatusCode::UNAUTHORIZED, Cow::Borrowed("Token expired")),
-            Self::MissingHeader(name) => (StatusCode::BAD_REQUEST, Cow::Borrowed(name)),
-            Self::DuplicateEmail => (StatusCode::CONFLICT, Cow::Borrowed("Email already exists")),
-            Self::DuplicateUsername => (
-                StatusCode::CONFLICT,
-                Cow::Borrowed("Username already exists"),
-            ),
-            Self::InvalidInput(details) => (StatusCode::BAD_REQUEST, Cow::Borrowed(details)),
-            Self::PasswordHashing => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Cow::Borrowed("Password hashing failed"),
-            ),
-            Self::PasswordVerification => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Cow::Borrowed("Password verification failed"),
-            ),
-            Self::TokenGen => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Cow::Borrowed("Token generation failed"),
-            ),
-            Self::Database(err) => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Cow::Owned(err.to_string()),
-            ),
-            Self::Jwt(err) => (StatusCode::UNAUTHORIZED, Cow::Owned(err.to_string())),
-        };
-
-        (status, msg).into_response()
-    }
-}
-
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Claims {
     pub sub: uuid::Uuid,
@@ -117,7 +41,7 @@ pub struct SignupRequest {
     pub password: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct LoginRequest {
     pub identifier: String,
     pub password: String,
@@ -135,7 +59,7 @@ impl IntoResponse for AuthResponse {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct RefreshRequest {
     pub refresh_token: String,
 }
@@ -257,7 +181,17 @@ pub struct LoginResponse {
     pub refresh_token: String,
 }
 
-#[axum::debug_handler]
+#[utoipa::path(
+    post,
+    path = "/auth/login",
+    tag = "auth",
+    request_body(content = LoginRequest),
+    responses(
+        (status = 200, description = "Auth tokens", body = AuthResponse),
+        (status = 401, description = "Invalid credentials"),
+        (status = 500, description = "Internal server error")
+    )
+)]
 pub async fn login(
     State(state): State<Arc<AppState>>,
     Json(req): Json<LoginRequest>,
@@ -298,7 +232,16 @@ pub async fn login(
     })
 }
 
-#[axum::debug_handler]
+#[utoipa::path(
+    post,
+    path = "/auth/logout",
+    tag = "auth",
+    request_body(content = RefreshRequest),
+    responses(
+        (status = 200, description = "Logged out"),
+        (status = 500, description = "Internal server error")
+    )
+)]
 pub async fn logout(
     State(state): State<Arc<AppState>>,
     Json(req): Json<RefreshRequest>,
@@ -315,7 +258,19 @@ pub async fn logout(
 
     Ok(())
 }
-#[utoipa::path(post, path = "/auth/signup", responses((status = OK, body = AuthResponse)), params(SignupRequest))]
+
+#[utoipa::path(
+    post,
+    path = "/auth/signup",
+    tag = "auth",
+    request_body(content = SignupRequest),
+    responses(
+        (status = 200, description = "Auth tokens", body = AuthResponse),
+        (status = 400, description = "Invalid input"),
+        (status = 409, description = "Duplicate email or username"),
+        (status = 500, description = "Internal server error")
+    )
+)]
 pub async fn signup(
     State(state): State<Arc<AppState>>,
     Json(req): Json<SignupRequest>,
@@ -353,7 +308,17 @@ pub async fn signup(
     })
 }
 
-#[axum::debug_handler]
+#[utoipa::path(
+    post,
+    path = "/auth/refresh",
+    tag = "auth",
+    request_body(content = RefreshRequest),
+    responses(
+        (status = 200, description = "New tokens", body = AuthResponse),
+        (status = 401, description = "Invalid or expired refresh token"),
+        (status = 500, description = "Internal server error")
+    )
+)]
 pub async fn refresh(
     State(state): State<Arc<AppState>>,
     Json(req): Json<RefreshRequest>,
