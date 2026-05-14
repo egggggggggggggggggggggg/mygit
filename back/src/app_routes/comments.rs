@@ -21,13 +21,27 @@ pub enum CommentTarget {
     Issue,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, ToSchema)]
 pub struct CommentCreationRequest {
-    target_type: CommentTarget,
-    target_id: Uuid,
-    body: String,
-    files: Vec<Uuid>,
+    pub target_type: CommentTarget,
+    pub target_id: Uuid,
+    pub body: String,
+    pub files: Vec<Uuid>,
 }
+#[utoipa::path(
+    post,
+    path = "/comments",
+    tag = "comments",
+    security(
+        ("bearerAuth" = [])
+    ),
+    request_body(content = CommentCreationRequest, content_type = "application/json"),
+    responses(
+        (status = 200, description = "Comment created"),
+        (status = 400, description = "Bad request"),
+        (status = 401, description = "Unauthorized")
+    )
+)]
 pub async fn create_comment(
     AuthUser(claims): AuthUser,
     State(state): State<Arc<AppState>>,
@@ -66,7 +80,7 @@ pub async fn create_comment(
     Ok(())
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct Comment {
     pub id: Uuid,
     pub author_id: Option<Uuid>,
@@ -84,19 +98,38 @@ pub struct CommentAcquireRequest {
     pub per_page: Option<i64>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct CommentPage {
     pub comments: Vec<Comment>,
     pub next_cursor: Option<CommentCursor>,
     pub has_more: bool,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct CommentCursor {
     pub created_at: OffsetDateTime,
     pub id: Uuid,
 }
-#[utoipa::path(get, path = "/{username}/{repo}/pulls/{id}/comments", tag = "comments", security(("bearerAuth" =[])), )]
+#[utoipa::path(
+    get,
+    path = "/comments",
+    tag = "comments",
+    security(
+        ("bearerAuth" = [])
+    ),
+    params(
+        ("repo_id" = Uuid, Query, description = "Repository id"),
+        ("target_type" = CommentTarget, Query, description = "Target type (issue or pull request)"),
+        ("cursor_created_at" = PrimitiveDateTime, Query, description = "Cursor created_at (optional)"),
+        ("cursor_id" = Uuid, Query, description = "Cursor id (optional)"),
+        ("per_page" = i64, Query, description = "Items per page (optional)")
+    ),
+    responses(
+        (status = 200, description = "Page of comments", body = CommentPage),
+        (status = 401, description = "Unauthorized"),
+        (status = 400, description = "Bad request")
+    )
+)]
 pub async fn get_comments(
     MaybeAuthUser(maybe_claims): MaybeAuthUser,
     State(state): State<Arc<AppState>>,

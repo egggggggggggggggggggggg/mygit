@@ -38,6 +38,7 @@ pub enum GixError {
 
     #[error("temp")]
     MissingTest(#[from] gix::object::find::existing::with_conversion::Error),
+
     #[error("unimplemented cause theres too many arbirtrary errors")]
     Unimplemented,
 }

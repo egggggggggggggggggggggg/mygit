@@ -6,7 +6,7 @@ use crate::{
 use axum::{
     Json,
     body::Body,
-    extract::{Multipart, Query, State},
+    extract::{Multipart, Path, State},
     http::{HeaderValue, Response},
     response::IntoResponse,
 };
@@ -22,7 +22,6 @@ use uuid::Uuid;
 #[allow(unused)]
 #[derive(Deserialize, ToSchema)]
 struct PlaceHolderForm {
-    name: String,
     #[schema(format = Binary, content_media_type = "application/octet_stream")]
     file: String,
 }
@@ -53,7 +52,7 @@ pub async fn upload(
 ) -> Result<Json<Vec<Uuid>>, ApiError> {
     let upload_root = state.file_storage.clone();
     let mut stored_file_ids = Vec::new();
-
+    eprintln!("[upload] start upload loop");
     while let Some(mut field) = multipart
         .next_field()
         .await
@@ -63,7 +62,7 @@ pub async fn upload(
 
         let temp_name = format!("tmp-{}", Uuid::new_v4());
         let temp_path = upload_root.join(&temp_name);
-
+        eprintln!("[upload] temp_path = {:?}", temp_path);
         let mut temp_file = File::create(&temp_path).await?;
 
         let mut hasher = Sha256::new();
@@ -71,7 +70,10 @@ pub async fn upload(
         // buffer used for MIME sniffing
         let mut sniff_buffer = Vec::with_capacity(MAX_SNIFF_BYTES);
 
-        while let Some(chunk) = field.chunk().await.map_err(|_| ApiError::Internal)? {
+        while let Some(chunk) = field.chunk().await.map_err(|e| {
+            eprintln!("[upload] field.chunk error: {:?}", e);
+            ApiError::ArbitraryFileUpload
+        })? {
             size_bytes += chunk.len() as i64;
 
             hasher.update(&chunk);
@@ -81,19 +83,21 @@ pub async fn upload(
                 let remaining = MAX_SNIFF_BYTES - sniff_buffer.len();
                 sniff_buffer.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
             }
-
-            temp_file
-                .write_all(&chunk)
-                .await
-                .map_err(|_| ApiError::Internal)?;
+            if let Err(e) = temp_file.write_all(&chunk).await {
+                eprintln!("[upload] temp_file.write_all error: {:?}", e);
+                return Err(ApiError::Internal);
+            }
         }
 
-        temp_file.flush().await.map_err(|_| ApiError::Internal)?;
+        if let Err(e) = temp_file.flush().await {
+            eprintln!("[upload] temp_file.flush error: {:?}", e);
+            return Err(ApiError::Internal);
+        }
         drop(temp_file);
         // infer MIME type
-        let inferred = infer::get(&sniff_buffer).ok_or(ApiError::UnsupportedFileType)?;
-
-        let mime_type = inferred.mime_type().to_string();
+        // let inferred = infer::get(&sniff_buffer).ok_or(ApiError::UnsupportedFileType)?;
+        //
+        // let mime_type = inferred.mime_type().to_string();
 
         // optional allowlist
         // match mime_type.as_str() {
@@ -105,22 +109,29 @@ pub async fn upload(
         // }
 
         let hash_hex = hex::encode(hasher.finalize());
-
+        eprintln!("[upload] sha256 = {}", hash_hex);
         let original_filename = field.file_name().unwrap_or("unknown").to_string();
-
+        eprintln!("[upload] original_filename = {}", original_filename);
         let dir1 = &hash_hex[0..2];
         let dir2 = &hash_hex[2..4];
 
         let final_dir = upload_root.join(dir1).join(dir2);
-
-        fs::create_dir_all(&final_dir)
-            .await
-            .map_err(|_| ApiError::Internal)?;
-
+        eprintln!("[upload] final_dir = {:?}", final_dir);
+        if let Err(e) = fs::create_dir_all(&final_dir).await {
+            eprintln!("[upload] create_dir_all error: {:?}", e);
+            return Err(ApiError::Filesystem);
+        }
         let final_path = final_dir.join(&hash_hex);
-
+        eprintln!("[upload] final_path = {:?}", final_path);
         let storage_key = format!("{}/{}/{}", dir1, dir2, hash_hex);
 
+        let mime_type = field
+            .content_type()
+            .map(|m| m.to_string())
+            .unwrap_or_else(|| "unknown".to_string());
+        eprintln!("[upload] mime_type = {}", mime_type);
+        eprintln!("[upload] size_bytes = {}", size_bytes);
+        eprintln!("[upload] sniff_buffer.len = {}", sniff_buffer.len());
         let insert_result = sqlx::query!(
             r#"
             INSERT INTO files (
@@ -143,28 +154,54 @@ pub async fn upload(
         .await;
 
         let file_id = match insert_result {
-            Ok(row) => row.id,
-            Err(_) => {
-                let _ = fs::remove_file(&temp_path).await;
+            Ok(row) => {
+                eprintln!("[upload] DB insert succeeded id={:?}", row.id);
+                row.id
+            }
+            Err(e) => {
+                eprintln!("[upload] DB insert error: {:?}", e);
+                // cleanup temp file
+                if let Err(rem_err) = fs::remove_file(&temp_path).await {
+                    eprintln!("[upload] remove_file(temp) error: {:?}", rem_err);
+                }
                 return Err(ApiError::Internal);
             }
         };
 
         if fs::metadata(&final_path).await.is_err() {
-            if fs::rename(&temp_path, &final_path).await.is_err() {
-                let _ = sqlx::query!(r#"DELETE FROM files WHERE id = $1"#, file_id)
+            if let Err(e) = fs::rename(&temp_path, &final_path).await {
+                eprintln!("[upload] rename error: {:?}", e);
+                if let Err(del_err) = sqlx::query!(r#"DELETE FROM files WHERE id = $1"#, file_id)
                     .execute(&state.pool)
-                    .await;
-
-                let _ = fs::remove_file(&temp_path).await;
-
+                    .await
+                {
+                    eprintln!(
+                        "[upload] DB delete error after rename failure: {:?}",
+                        del_err
+                    );
+                }
+                if let Err(rem_err) = fs::remove_file(&temp_path).await {
+                    eprintln!(
+                        "[upload] remove_file(temp) after rename failure error: {:?}",
+                        rem_err
+                    );
+                }
                 return Err(ApiError::Internal);
+            } else {
+                eprintln!("[upload] renamed temp -> final");
             }
         } else {
-            fs::remove_file(&temp_path).await?;
+            if let Err(e) = fs::remove_file(&temp_path).await {
+                eprintln!(
+                    "[upload] remove_file(temp) when final exists error: {:?}",
+                    e
+                );
+            } else {
+                eprintln!("[upload] removed temp because final already existed");
+            }
         }
-
         stored_file_ids.push(file_id);
+        eprintln!("[upload] stored_file_ids now len={}", stored_file_ids.len());
     }
 
     Ok(Json(stored_file_ids))
@@ -188,10 +225,11 @@ pub async fn upload(
 pub async fn get_file(
     MaybeAuthUser(maybe_claims): MaybeAuthUser,
     State(state): State<Arc<AppState>>,
-    Query(id): Query<Uuid>,
+    Path(id): Path<Uuid>,
 ) -> Result<impl IntoResponse, ApiError> {
     let user_id = maybe_claims.map(|c| c.sub);
-    let can_access = sqlx::query_scalar!(
+    //Annoying to figure out so imma avoid using it for now. No guarded files.
+    let _can_access = sqlx::query_scalar!(
         r#"
         SELECT EXISTS ( 
             SELECT 1
@@ -217,9 +255,9 @@ pub async fn get_file(
     .fetch_one(&state.pool)
     .await?
     .unwrap_or(false);
-    if !can_access {
-        return Err(ApiError::Unauthorized);
-    }
+    // if !can_access {
+    //     return Err(ApiError::Unauthorized);
+    // }
     let file = sqlx::query!(
         r#"
         SELECT

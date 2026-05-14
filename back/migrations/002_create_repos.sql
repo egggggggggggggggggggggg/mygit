@@ -12,4 +12,4 @@ CREATE TABLE repositories (
 );
 --Could possibly add a commits table as a sorta semi-cache for displaying repo history
 --Avoids file reading which is slower when the whole data isn't really needed.   
-
+   

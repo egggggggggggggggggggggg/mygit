@@ -34,20 +34,20 @@ pub struct Claims {
     pub jti: Uuid,
 }
 
-#[derive(Debug, Deserialize, ToSchema, IntoParams)]
+#[derive(Debug, Deserialize, ToSchema, IntoParams, Serialize)]
 pub struct SignupRequest {
     pub email: String,
     pub username: String,
     pub password: String,
 }
 
-#[derive(Debug, Deserialize, ToSchema)]
+#[derive(Debug, Deserialize, ToSchema, Serialize)]
 pub struct LoginRequest {
     pub identifier: String,
     pub password: String,
 }
 
-#[derive(Debug, Serialize, ToSchema)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct AuthResponse {
     pub access_token: String,
     pub refresh_token: String,
@@ -59,7 +59,7 @@ impl IntoResponse for AuthResponse {
     }
 }
 
-#[derive(Debug, Deserialize, ToSchema)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct RefreshRequest {
     pub refresh_token: String,
 }

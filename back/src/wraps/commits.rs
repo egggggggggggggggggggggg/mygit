@@ -179,7 +179,6 @@ pub fn commits_for_branch_paginated(
         .into_fully_peeled_id()
         .with_context(|| format!("could not peel '{branch}' to a commit"))?
         .detach();
-
     let skip = page.saturating_sub(1) * per_page;
 
     let walk = repo
@@ -208,6 +207,5 @@ pub fn commits_for_branch_paginated(
 
         result.push(CommitInfo::try_from(commit)?);
     }
-
     Ok(result)
 }

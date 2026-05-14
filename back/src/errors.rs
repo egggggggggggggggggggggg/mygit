@@ -60,11 +60,10 @@ pub enum ApiError {
 
     #[error("unsupported file type")]
     UnsupportedFileType,
-}
 
-//
-// Error -> HTTP Response
-//
+    #[error("dumb arbitrary file upload error")]
+    ArbitraryFileUpload,
+}
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
@@ -100,6 +99,10 @@ impl IntoResponse for ApiError {
             Self::FileNotFound => (StatusCode::INTERNAL_SERVER_ERROR, "file not found"),
 
             Self::UnsupportedFileType => (StatusCode::UNSUPPORTED_MEDIA_TYPE, "file not allowed"),
+
+            Self::ArbitraryFileUpload => {
+                (StatusCode::UNSUPPORTED_MEDIA_TYPE, "arbitrary error idk")
+            }
         };
         tracing::error!(
             status = %status,

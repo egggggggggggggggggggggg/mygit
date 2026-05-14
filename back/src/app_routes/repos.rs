@@ -30,15 +30,22 @@ pub enum RepoErrors {
     MissingHead,
 }
 
-#[derive(Deserialize, ToSchema)]
+#[derive(Deserialize, ToSchema, Serialize)]
 pub struct NewRepo {
-    name: String,
-    description: Option<String>,
+    pub name: String,
+    pub description: Option<String>,
 }
 
-#[derive(Deserialize, ToSchema)]
+#[derive(Deserialize, ToSchema, Serialize)]
 pub struct UpdateRepo {
-    description: Option<String>,
+    pub description: Option<String>,
+}
+#[derive(Deserialize, Serialize)]
+pub struct InnerRoute {
+    pub owner: String,
+    pub name: String,
+    pub path: String,
+    pub id: ObjectId,
 }
 #[utoipa::path(
     get,
@@ -93,6 +100,7 @@ pub async fn repo_home(
         "id": rec.id
     })))
 }
+
 #[utoipa::path(
     post,
     path = "/user/repos",
@@ -134,11 +142,14 @@ pub async fn create_repo(
 
         ApiError::Database
     })?;
-    let repo_id = user_id.to_string();
-    let dir1 = &repo_id[0..2];
-    let dir2 = &repo_id[2..4];
-    let repo_path = state.git_storage.join(dir1).join(dir2).join(payload.name);
-    fs::create_dir_all(repo_path.parent().unwrap()).map_err(|_| ApiError::Internal)?;
+    let user_id = user_id.to_string();
+    let (dir1, dir2) = shards_from_uuid(&user_id);
+    let repo_path = state
+        .git_storage
+        .join(dir1)
+        .join(dir2)
+        .join(&user_id)
+        .join(payload.name);
     if init_bare_repo(&repo_path).is_err() {
         tx.rollback().await.ok();
         return Err(ApiError::Git);
@@ -225,108 +236,6 @@ pub async fn delete_repo(
     Ok(StatusCode::OK)
 }
 #[utoipa::path(
-    patch,
-    path = "/{username}/{repo}",
-    tag = "repositories",
-    security(("bearerAuth" = [])),
-    request_body(content = UpdateRepo),
-    params(
-        ("username" = String, Path, description = "Repository owner username"),
-        ("repo" = String, Path, description = "Repository name")
-    ),
-    responses(
-        (status = 200, description = "Updated repository metadata", body = serde_json::Value),
-        (status = 401, description = "Unauthorized"),
-        (status = 500, description = "Internal server error")
-    )
-)]
-pub async fn update_repo_metadata(
-    AuthUser(claims): AuthUser,
-    State(state): State<Arc<AppState>>,
-    Path(repo_name): Path<String>,
-    Json(payload): Json<UpdateRepo>,
-) -> Result<Json<serde_json::Value>, ApiError> {
-    let user_id = claims.sub;
-    let rec = sqlx::query!(
-        r#"
-        UPDATE repositories 
-        
-        SET description = $1
-        WHERE owner_id = $2 AND name = $3
-        RETURNING id, name, description
-        "#,
-        payload.description,
-        user_id,
-        repo_name
-    )
-    .fetch_optional(&state.pool)
-    .await?;
-    let rec = rec.ok_or(ApiError::Unauthorized)?;
-    Ok(Json(serde_json::json!({
-        "id": rec.id,
-        "name": rec.name,
-        "description": rec.description
-    })))
-}
-
-#[utoipa::path(
-    get,
-    path = "/{repo_owner}/{repo_name}/commits",
-    tag = "commits",
-    params(
-        ("repo_owner" = String, Path, description = "Repository owner username"),
-        ("repo_name" = String, Path, description = "Repository name")
-    ),
-    responses(
-        (status = 200, description = "List of commits", body = [CommitInfo]),
-        (status = 401, description = "Unauthorized"),
-        (status = 500, description = "Internal server error")
-    ),
-    security(("bearerAuth" = []))
-)]
-pub async fn list_commits(
-    MaybeAuthUser(maybe_claims): MaybeAuthUser,
-    State(state): State<Arc<AppState>>,
-    Path((repo_owner, repo_name)): Path<(String, String)>,
-    Query(pagination): Query<Pagination>,
-) -> Result<Json<Vec<CommitInfo>>, ApiError> {
-    let user_id = maybe_claims.map(|c| c.sub);
-    // Access check
-    if !has_access(&state.pool, &repo_owner, &repo_name, user_id).await? {
-        return Err(ApiError::Unauthorized);
-    }
-    let owner_id = sqlx::query_scalar!(
-        r#"
-        SELECT u.id 
-        FROM users u 
-        WHERE u.username = $1
-        "#,
-        repo_owner,
-    );
-    //Page should not be limited to 1  but the total amount of commits.
-    //Repo meta data should return the amount of commits and issues which avoids having to process
-    //all the repo metadata reading which is faster. Also check the in mem cache.
-    let page = pagination.page.unwrap_or(1).max(1);
-    let per_page = pagination.per_page.unwrap_or(20).clamp(1, 100);
-
-    let path = state.git_storage.clone().join(&repo_owner).join(&repo_name);
-    let repo = gix::open(path).unwrap();
-    let commits = commits_for_branch_paginated(
-        &repo, "main", // or resolve default branch properly
-        page, per_page,
-    )
-    .map_err(|_| ApiError::CommitListingFailed)?;
-    Ok(Json(commits))
-}
-///A lot of these are gix errors cuz gix doesn't define a centralized error enum.
-#[derive(Deserialize)]
-pub struct InnerRoute {
-    owner: String,
-    name: String,
-    path: String,
-    id: ObjectId,
-}
-#[utoipa::path(
     get,
     path = "/{owner}/{name}/tree/{id}",
     tag = "repositories",
@@ -343,21 +252,49 @@ pub struct InnerRoute {
     ),
     security(("bearerAuth" = []))
 )]
+
 pub async fn repo_tree(
     MaybeAuthUser(claims): MaybeAuthUser,
     State(state): State<Arc<AppState>>,
     Path(route): Path<InnerRoute>,
 ) -> Result<Json<Node>, ApiError> {
-    let user_id = claims.map(|c| c.sub);
-    if !has_access(&state.pool, &route.owner, &route.name, user_id).await? {
+    if !has_access(
+        &state.pool,
+        &route.owner,
+        &route.name,
+        claims.map(|c| c.sub),
+    )
+    .await?
+    {
         return Err(ApiError::Unauthorized);
     }
-    let path = state.git_storage.join(&route.owner).join(&route.name);
+    let owner_id = sqlx::query!(
+        r#"
+        SELECT r.owner_id
+        FROM repositories r
+        JOIN users u ON u.id = r.owner_id
+        WHERE r.name = $1 AND u.username = $2
+        "#,
+        route.name,
+        route.owner
+    )
+    .fetch_one(&state.pool)
+    .await?
+    .owner_id;
+    let owner_id = owner_id.to_string();
+    let (dir1, dir2) = shards_from_uuid(&owner_id);
+    let path = state
+        .git_storage
+        .join(dir1)
+        .join(dir2)
+        .join(&owner_id)
+        .join(&route.name);
     let repo = gix::open(&path).map_err(|_| ApiError::RepoNotFound)?;
     Ok(Json(
         get_tree(&repo, route.id, "").map_err(|_| ApiError::Internal)?,
     ))
 }
+
 #[utoipa::path(
     get,
     path = "/{owner}/{name}/blob/{id}",
@@ -385,7 +322,27 @@ pub async fn view_file(
     if !has_access(&state.pool, &route.owner, &route.name, user_id).await? {
         return Err(ApiError::Unauthorized);
     }
-    let path = state.git_storage.join(&route.owner).join(&route.name);
+    let owner_id = sqlx::query!(
+        r#"
+        SELECT r.owner_id
+        FROM repositories r
+        JOIN users u ON u.id = r.owner_id
+        WHERE r.name = $1 AND u.username = $2        
+        "#,
+        route.name,
+        route.owner
+    )
+    .fetch_one(&state.pool)
+    .await?
+    .owner_id;
+    let owner_id = owner_id.to_string();
+    let (dir1, dir2) = shards_from_uuid(&owner_id);
+    let path = state
+        .git_storage
+        .join(dir1)
+        .join(dir2)
+        .join(&owner_id)
+        .join(&route.name);
     let repo = gix::open(&path).map_err(|_| ApiError::RepoNotFound)?;
     let file =
         read_file_at_commit(&repo, route.id, &route.path).map_err(|_| ApiError::RepoNotFound)?;
@@ -396,11 +353,117 @@ pub async fn view_file(
         .body(body)
         .unwrap())
 }
+
+#[utoipa::path(
+    get,
+    path = "/{repo_owner}/{repo_name}/commits",
+    tag = "commits",
+    params(
+        ("repo_name" = String, Path, description = "Repository name"),
+        ("repo_owner" = String, Path, description = "Repository owner username")
+    ),
+    responses(
+        (status = 200, description = "List of commits", body = [CommitInfo]),
+        (status = 401, description = "Unauthorized"),
+        (status = 500, description = "Internal server error")
+    ),
+    security(("bearerAuth" = []))
+)]
+pub async fn list_commits(
+    MaybeAuthUser(maybe_claims): MaybeAuthUser,
+    State(state): State<Arc<AppState>>,
+    Path((repo_owner, repo_name)): Path<(String, String)>,
+    Query(pagination): Query<Pagination>,
+) -> Result<Json<Vec<CommitInfo>>, ApiError> {
+    let user_id = maybe_claims.map(|c| c.sub);
+    // Access check
+    if !has_access(&state.pool, &repo_owner, &repo_name, user_id).await? {
+        return Err(ApiError::Unauthorized);
+    }
+    let owner_id = sqlx::query!(
+        r#"
+        SELECT r.owner_id
+        FROM repositories r
+        JOIN users u ON u.id = r.owner_id
+        WHERE r.name = $1 AND u.username = $2        
+        "#,
+        repo_name,
+        repo_owner
+    )
+    .fetch_one(&state.pool)
+    .await?
+    .owner_id;
+    let owner_id = owner_id.to_string();
+    let (dir1, dir2) = shards_from_uuid(&owner_id);
+    let path = state
+        .git_storage
+        .join(dir1)
+        .join(dir2)
+        .join(&owner_id)
+        .join(&repo_name);
+    let page = pagination.page.unwrap_or(1).max(1);
+    let per_page = pagination.per_page.unwrap_or(20).clamp(1, 100);
+    let repo = gix::open(path).unwrap();
+    let commits = commits_for_branch_paginated(
+        &repo, "main", // or resolve default branch properly
+        page, per_page,
+    )
+    .map_err(|_| ApiError::CommitListingFailed)?;
+    Ok(Json(commits))
+}
+#[utoipa::path(
+    patch,
+    path = "/{username}/{repo}",
+    tag = "repositories",
+    security(("bearerAuth" = [])),
+    request_body(content = UpdateRepo),
+    params(
+        ("username" = String, Path, description = "Repository owner username"),
+        ("repo" = String, Path, description = "Repository name")
+    ),
+    responses(
+        (status = 200, description = "Updated repository metadata", body = serde_json::Value),
+        (status = 401, description = "Unauthorized"),
+        (status = 500, description = "Internal server error")
+    )
+)]
+pub async fn update_repo_metadata(
+    AuthUser(claims): AuthUser,
+    State(state): State<Arc<AppState>>,
+    Path(repo_name): Path<String>,
+    Json(payload): Json<UpdateRepo>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let user_id = claims.sub;
+    let rec = sqlx::query!(
+        r#"
+        UPDATE repositories 
+        SET description = $1
+        WHERE owner_id = $2 AND name = $3
+        RETURNING id, name, description
+        "#,
+        payload.description,
+        user_id,
+        repo_name
+    )
+    .fetch_optional(&state.pool)
+    .await?;
+    let rec = rec.ok_or(ApiError::Unauthorized)?;
+    Ok(Json(serde_json::json!({
+        "id": rec.id,
+        "name": rec.name,
+        "description": rec.description
+    })))
+}
+
 fn init_bare_repo(path: &std::path::Path) -> Result<(), anyhow::Error> {
     fs::create_dir_all(path)?;
     gix::create::into(path, Kind::Bare, gix::create::Options::default())?;
     Ok(())
 }
 fn remove_repo(path: &std::path::Path) -> Result<(), std::io::Error> {
-    fs::remove_file(path)
+    fs::remove_dir_all(path)
+}
+#[inline(always)]
+fn shards_from_uuid(uuid: &str) -> (&str, &str) {
+    (&uuid[0..2], &uuid[2..4])
 }
